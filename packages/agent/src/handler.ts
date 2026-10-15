@@ -4,6 +4,7 @@ import type { LambdaFunctionURLEvent, LambdaFunctionURLResult } from "aws-lambda
 import { type AgentDeps, runTurn } from "./agent.js";
 import { McpChessTools } from "./mcpClient.js";
 import { DynamoSessionStore } from "./sessions.js";
+import { pollySpeaker } from "./voice.js";
 
 const bedrock = new BedrockRuntimeClient({});
 const secrets = new SecretsManagerClient({});
@@ -16,6 +17,7 @@ const deps: AgentDeps = {
   }),
   sessions: new DynamoSessionStore(),
   modelId: process.env.MODEL_ID!,
+  speak: pollySpeaker(),
 };
 
 // CORS headers are added by the Function URL configuration (AllowedOrigin = the CloudFront site).
@@ -26,26 +28,53 @@ const respond = (statusCode: number, body: unknown): LambdaFunctionURLResult => 
 });
 
 export const handler = async (event: LambdaFunctionURLEvent): Promise<LambdaFunctionURLResult> => {
-  if (event.requestContext.http.method !== "POST") return respond(405, { error: "POST { sessionId, text }" });
+  if (event.requestContext.http.method !== "POST") return respond(405, { error: "POST { sessionId, text, alternatives? }" });
 
-  let sessionId: unknown;
-  let text: unknown;
+  let body: { sessionId?: unknown; text?: unknown; alternatives?: unknown; warm?: unknown };
   try {
     const raw = event.isBase64Encoded ? Buffer.from(event.body ?? "", "base64").toString() : (event.body ?? "");
-    ({ sessionId, text } = JSON.parse(raw));
+    body = JSON.parse(raw);
   } catch {
-    return respond(400, { error: "Body must be JSON: { sessionId, text }" });
+    return respond(400, { error: "Body must be JSON: { sessionId, text, alternatives? }" });
   }
+
+  // Page-load warm-up: opens the MCP connection (waking that Lambda too) so the first real turn is fast.
+  if (body.warm === true) {
+    const t = Date.now();
+    await deps.tools.listTools().catch(() => undefined);
+    return respond(200, { ok: true, ms: Date.now() - t });
+  }
+
+  const { sessionId, text } = body;
   if (typeof sessionId !== "string" || !/^[\w-]{8,64}$/.test(sessionId)) return respond(400, { error: "sessionId must be 8-64 letters, digits, - or _" });
   if (typeof text !== "string" || !text.trim() || text.length > 500) return respond(400, { error: "text must be 1-500 characters" });
+  const alternatives = Array.isArray(body.alternatives)
+    ? body.alternatives.filter((a): a is string => typeof a === "string" && a.length <= 500).slice(0, 5)
+    : [];
 
   const started = Date.now();
   try {
-    const result = await runTurn(deps, sessionId, text.trim());
-    console.log(JSON.stringify({ level: "info", msg: "turn", sessionId, text, reply: result.reply, tools: result.toolCalls.map((t) => t.name), ms: Date.now() - started }));
+    const result = await runTurn(deps, sessionId, { text: text.trim(), alternatives });
+    console.log(
+      JSON.stringify({
+        level: "info",
+        msg: "turn",
+        sessionId,
+        text,
+        alternatives,
+        reply: result.reply,
+        tools: result.toolCalls.map((t) => t.name),
+        model: deps.modelId,
+        usage: result.usage,
+        pollyChars: result.audio ? result.reply.length : 0,
+        ms: Date.now() - started,
+      }),
+    );
     return respond(200, result);
   } catch (err) {
     console.error(JSON.stringify({ level: "error", msg: "turn failed", sessionId, error: String(err), stack: (err as Error)?.stack }));
-    return respond(200, { reply: "Sorry, I'm having trouble reaching the chess board right now. Please try again in a moment.", gameOver: false, toolCalls: [], error: true });
+    const reply = "Sorry, I'm having trouble reaching the chess board right now. Please try again in a moment.";
+    const audio = await deps.speak?.(reply, "Kajal", 100);
+    return respond(200, { reply, audio, gameOver: false, expectsReply: false, toolCalls: [], error: true });
   }
 };

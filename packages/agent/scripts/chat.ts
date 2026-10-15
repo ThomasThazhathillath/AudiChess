@@ -5,7 +5,7 @@ import { McpChessTools } from "../src/mcpClient.js";
 import { MemorySessionStore } from "../src/sessions.js";
 
 // Talk to the agent locally: real Bedrock (Nova Pro) + the deployed MCP server, sessions in memory.
-//   npm run chat -- "start a new game" "pawn to e4" "where is the black queen"
+//   npm run chat -- "start a new game" "pawn to e4" "night forever|knight e4"   ("|" separates recognition alternatives)
 // Env: MCP_URL (defaults to the deployed server), MODEL_ID, AWS_REGION (ap-south-1).
 
 const region = process.env.AWS_REGION ?? "ap-south-1";
@@ -28,10 +28,11 @@ const utterances = process.argv.slice(2);
 if (utterances.length === 0) utterances.push("Alexa, let's play chess. I'll be white, easy please.", "pawn to e4", "where is the black queen?");
 
 const sessionId = `local-${Date.now()}`;
-for (const text of utterances) {
+for (const utterance of utterances) {
+  const [text, ...alternatives] = utterance.split("|").map((s) => s.trim());
   const t = Date.now();
-  const r = await runTurn(deps, sessionId, text);
-  console.log(`\n🧑 ${text}`);
+  const r = await runTurn(deps, sessionId, { text, alternatives: [text, ...alternatives] });
+  console.log(`\n🧑 ${utterance}`);
   for (const c of r.toolCalls) console.log(`   🔧 ${c.name}(${JSON.stringify({ ...c.args, gameId: c.args.gameId ? "…" : undefined, sessionId: undefined })})${c.isError ? " ✗" : ""}`);
-  console.log(`🔵 ${r.reply}   (${Date.now() - t} ms)`);
+  console.log(`🔵 ${r.reply}   (${Date.now() - t} ms, ${r.usage.rounds} rounds, ${r.usage.inputTokens}+${r.usage.outputTokens} tokens)`);
 }

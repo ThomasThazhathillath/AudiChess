@@ -1,14 +1,17 @@
-// Alexa Chess - Echo simulator. Browser speech in, agent call, browser speech out.
+// Alexa Chess: a voice-only Echo. Say "Alexa ..." -> agent -> Polly audio back.
 (() => {
   "use strict";
 
   const $ = (id) => document.getElementById(id);
-  const device = $("device"), micBtn = $("mic-btn"), statusEl = $("status"), captionEl = $("caption");
-  const log = $("log"), empty = $("empty"), composer = $("composer"), input = $("composer-input");
-  const gamePill = $("game-pill"), handsFree = $("handsfree");
-  const langSel = $("lang"), voiceSel = $("voice"), rate = $("rate"), rateOut = $("rate-out"), mute = $("mute");
+  const device = $("device"), live = $("live"), startEl = $("start"), startBtn = $("start-btn"), startNote = $("start-note");
+  const debugEl = $("debug"), debugLog = $("debug-log"), langSel = $("lang");
 
-  // ---------- small persistence helpers (storage can be unavailable) ----------
+  // ---------- tunables ----------
+  const WAKE = window.AlexaWake.WAKE; // shared with the tested gate in wake.js
+  const AWAKE_MS = 6000;      // after a bare "Alexa", wait this long for the command
+  const FOLLOW_UP_MS = 8000;  // after Alexa asks a question, answer without the wake word
+
+  // ---------- storage (may be unavailable) ----------
   const store = {
     get(k, d) { try { const v = localStorage.getItem(k); return v === null ? d : v; } catch { return d; } },
     set(k, v) { try { localStorage.setItem(k, v); } catch { /* ignore */ } },
@@ -17,229 +20,271 @@
   let sessionId = store.get("alexaChess.session", null) || newId();
   store.set("alexaChess.session", sessionId);
 
+  // ---------- state ----------
   let agentUrl = null;
-  let busy = false;
-  let listening = false;
+  let started = false;
+  let muted = false;
+  let busy = false;          // waiting for the agent
+  let speaking = false;
+  let awakeUntil = 0;
+  let followUpUntil = 0;
+  let currentAudio = null;
+  let stateTimer = null;
 
-  // ---------- device state ----------
-  function setState(state, message) {
-    device.dataset.state = state;
-    if (message !== undefined) statusEl.textContent = message;
+  function setState(s, announce) {
+    device.dataset.state = s;
+    if (announce) live.textContent = announce;
   }
 
-  // ---------- conversation log ----------
-  function addMessage(role, text, extra = {}) {
-    empty.hidden = true;
+  /** The ring's resting state: red if muted, faint blue while a follow-up/awake window is open, else dark. */
+  function restState() {
+    clearTimeout(stateTimer);
+    if (muted) return setState("muted");
+    const now = Date.now();
+    const until = Math.max(awakeUntil, followUpUntil);
+    if (until > now) {
+      setState(awakeUntil > now ? "awake" : "followup");
+      stateTimer = setTimeout(restState, until - now + 50);
+    } else setState("idle");
+  }
+
+  // ---------- earcons (WebAudio, no files) ----------
+  let audioCtx = null;
+  function tone(freqs, dur = 0.12, gain = 0.06) {
+    if (!audioCtx) return;
+    let t = audioCtx.currentTime;
+    for (const f of freqs) {
+      const o = audioCtx.createOscillator(), g = audioCtx.createGain();
+      o.type = "sine"; o.frequency.value = f;
+      g.gain.setValueAtTime(0, t);
+      g.gain.linearRampToValueAtTime(gain, t + 0.02);
+      g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+      o.connect(g).connect(audioCtx.destination);
+      o.start(t); o.stop(t + dur + 0.02);
+      t += dur * 0.8;
+    }
+  }
+  const earcon = {
+    wake: () => tone([660, 880], 0.1),
+    end: () => tone([740, 520], 0.09, 0.04),
+    error: () => tone([300, 220], 0.16, 0.05),
+  };
+
+  // ---------- debug drawer (press D) ----------
+  function logTurn(heard, alts, data, ms) {
     const li = document.createElement("li");
-    li.className = `msg ${role}${extra.error ? " err" : ""}`;
-    const who = document.createElement("span");
-    who.className = "who";
-    who.textContent = role === "user" ? "You" : "Alexa";
-    li.append(who);
-    const body = document.createElement("span");
-    body.className = "body";
-    if (extra.typing) {
-      body.innerHTML = '<span class="typing" aria-label="Alexa is thinking"><i></i><i></i><i></i></span>';
-    } else {
-      body.textContent = text;
-    }
-    li.append(body);
-    log.append(li);
-    log.scrollTop = log.scrollHeight;
-    return li;
-  }
-
-  function fillReply(li, data, ms) {
-    li.querySelector(".body").textContent = data.reply;
-    if (data.error) li.classList.add("err");
-    if (data.toolCalls && data.toolCalls.length) {
-      const tools = document.createElement("div");
-      tools.className = "tools";
-      tools.setAttribute("aria-label", "MCP tools called");
-      for (const t of data.toolCalls) {
-        const chip = document.createElement("span");
-        chip.className = `tool${t.isError ? " bad" : ""}`;
-        const args = Object.entries(t.args || {}).filter(([k]) => k !== "gameId" && k !== "sessionId");
-        chip.textContent = `${t.name}(${args.map(([k, v]) => `${k}: ${JSON.stringify(v)}`).join(", ")})`;
-        chip.title = t.speech || "";
-        tools.append(chip);
-      }
-      li.append(tools);
-    }
-    const meta = document.createElement("div");
-    meta.className = "meta";
-    meta.textContent = `${(ms / 1000).toFixed(1)} s`;
-    li.append(meta);
-    log.scrollTop = log.scrollHeight;
-  }
-
-  function updateGamePill(data) {
-    if (!data.gameId) { gamePill.hidden = true; return; }
-    gamePill.hidden = false;
-    gamePill.textContent = data.gameOver ? "Game over" : "Game in progress";
-    gamePill.classList.toggle("over", !!data.gameOver);
+    const esc = (s) => String(s).replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" })[c]);
+    const tools = (data.toolCalls || []).map((t) => `${t.name}(${JSON.stringify(t.args || {})})${t.isError ? " ✗" : ""}`).join(" · ");
+    li.innerHTML =
+      `<div class="you">🧑 ${esc(heard)}</div>` +
+      (alts.length > 1 ? `<div class="alts">alts: ${esc(alts.slice(1).join(" | "))}</div>` : "") +
+      (tools ? `<div class="tools">🔧 ${esc(tools)}</div>` : "") +
+      `<div>🔵 ${esc(data.reply || "")}</div>` +
+      `<div class="meta">${(ms / 1000).toFixed(1)} s · ${data.voice || "browser voice"}${data.usage ? ` · ${data.usage.rounds} rounds · ${data.usage.inputTokens}+${data.usage.outputTokens} tok` : ""}</div>`;
+    debugLog.prepend(li);
   }
 
   // ---------- talking to the agent ----------
-  async function send(text) {
+  async function send(text, alternatives) {
     text = text.trim();
     if (!text || busy) return;
-    if (!agentUrl) { setState("error", "Still loading configuration, try again in a second."); return; }
+    if (!agentUrl) return;
     busy = true;
-    stopSpeaking();
-    addMessage("user", text);
-    const pending = addMessage("alexa", "", { typing: true });
-    setState("thinking", "Thinking…");
-    captionEl.textContent = "";
-    const started = performance.now();
+    awakeUntil = 0;
+    followUpUntil = 0;
+    earcon.end();
+    setState("thinking", "Thinking");
+    const t0 = performance.now();
+    let data;
     try {
       const res = await fetch(agentUrl, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ sessionId, text }),
+        body: JSON.stringify({ sessionId, text, alternatives }),
       });
-      const data = await res.json().catch(() => ({}));
+      data = await res.json().catch(() => ({}));
       if (!res.ok || !data.reply) throw new Error(data.error || `HTTP ${res.status}`);
-      fillReply(pending, data, performance.now() - started);
-      updateGamePill(data);
-      busy = false;
-      speak(data.reply);
     } catch (err) {
-      busy = false;
-      const msg = "Sorry, I couldn't reach the chess server. Please try again.";
-      fillReply(pending, { reply: msg, error: true }, performance.now() - started);
-      setState("error", `${msg} (${err.message})`);
-      speak(msg);
+      data = { reply: "Sorry, I couldn't reach the chess board. Please try again.", error: true };
+      earcon.error();
     }
+    busy = false;
+    logTurn(text, alternatives, data, performance.now() - t0);
+    await speak(data);
+    if (data.expectsReply) followUpUntil = Date.now() + FOLLOW_UP_MS;
+    restState();
   }
 
-  // ---------- speech out ----------
-  let voices = [];
-  function loadVoices() {
-    if (!("speechSynthesis" in window)) return;
-    voices = speechSynthesis.getVoices().filter((v) => v.lang && v.lang.toLowerCase().startsWith("en"));
-    const saved = store.get("alexaChess.voice", "");
-    voiceSel.innerHTML = "";
-    const preferred = (v) => /aria|jenny|neerja|google us english|samantha|zira|female/i.test(v.name);
-    voices.sort((a, b) => Number(preferred(b)) - Number(preferred(a)));
-    for (const v of voices) {
-      const opt = document.createElement("option");
-      opt.value = v.name;
-      opt.textContent = `${v.name} (${v.lang})`;
-      if (v.name === saved) opt.selected = true;
-      voiceSel.append(opt);
-    }
+  // ---------- speaking (Polly MP3 from the agent, browser voice as fallback) ----------
+  function speak(data) {
+    return new Promise((resolve) => {
+      speaking = true;
+      pauseListening();
+      setState(data.error ? "error" : "speaking");
+      const done = () => {
+        if (!speaking) return;
+        speaking = false;
+        currentAudio = null;
+        resumeListening();
+        resolve();
+      };
+      if (data.audio) {
+        const audio = new Audio(`data:audio/mpeg;base64,${data.audio}`);
+        currentAudio = audio;
+        audio.onended = done;
+        audio.onerror = () => browserSpeak(data.reply, done);
+        audio.play().catch(() => browserSpeak(data.reply, done));
+      } else browserSpeak(data.reply, done);
+    });
   }
 
-  function speak(text) {
-    if (mute.checked || !("speechSynthesis" in window)) { afterSpeaking(); return; }
+  function browserSpeak(text, done) {
+    if (!("speechSynthesis" in window)) return done();
     const u = new SpeechSynthesisUtterance(text);
-    const v = voices.find((x) => x.name === voiceSel.value);
-    if (v) { u.voice = v; u.lang = v.lang; }
-    u.rate = Number(rate.value);
-    u.onstart = () => setState("speaking", text);
-    u.onend = afterSpeaking;
-    u.onerror = afterSpeaking;
+    const lang = langSel.value;
+    const voice = speechSynthesis.getVoices().find((v) => v.lang === lang) || speechSynthesis.getVoices().find((v) => v.lang.startsWith("en"));
+    if (voice) u.voice = voice;
+    u.onend = done;
+    u.onerror = done;
     speechSynthesis.cancel();
     speechSynthesis.speak(u);
   }
 
   function stopSpeaking() {
+    if (currentAudio) { currentAudio.pause(); currentAudio.onended?.(); }
     if ("speechSynthesis" in window) speechSynthesis.cancel();
   }
 
-  function afterSpeaking() {
-    if (device.dataset.state === "speaking" || device.dataset.state === "thinking") setState("idle");
-    if (handsFree.checked && recognition && !busy) setTimeout(startListening, 250);
-  }
-
-  // ---------- speech in ----------
+  // ---------- listening: continuous recognition gated by the wake word ----------
   const Recognition = window.SpeechRecognition || window.webkitSpeechRecognition;
   let recognition = null;
+  let listening = false;
+  let wantListening = false;
+  let restartDelay = 250;
+
   if (Recognition) {
     recognition = new Recognition();
+    recognition.continuous = true;
     recognition.interimResults = true;
-    recognition.maxAlternatives = 1;
-    recognition.continuous = false;
-    recognition.onstart = () => { listening = true; setState("listening", "Listening…"); };
-    recognition.onresult = (e) => {
-      let interim = "", final = "";
-      for (let i = e.resultIndex; i < e.results.length; i++) {
-        const t = e.results[i][0].transcript;
-        if (e.results[i].isFinal) final += t; else interim += t;
-      }
-      captionEl.textContent = final || interim;
-      if (final) send(final);
-    };
-    recognition.onerror = (e) => {
-      listening = false;
-      if (e.error === "no-speech" || e.error === "aborted") { setState("idle", "I didn't hear anything. Press the button and try again."); return; }
-      if (e.error === "not-allowed") { setState("error", "Microphone access is blocked. Allow it in the browser, or type below."); return; }
-      setState("error", `Speech recognition error: ${e.error}. You can type below.`);
-    };
+    recognition.maxAlternatives = 5;
+
+    recognition.onstart = () => { listening = true; restartDelay = 250; };
     recognition.onend = () => {
       listening = false;
-      if (device.dataset.state === "listening") setState("idle", "Press the button or Space to talk.");
+      // Chrome stops after silences and network hiccups: keep the mic open while we want it.
+      if (wantListening && !muted && !speaking) setTimeout(startListening, restartDelay);
     };
-  } else {
-    statusEl.textContent = "Voice input needs Chrome or Edge. You can still type commands below.";
+    recognition.onerror = (e) => {
+      if (e.error === "not-allowed" || e.error === "service-not-allowed") {
+        wantListening = false;
+        setState("error", "Microphone access is blocked. Allow it in the browser settings and reload.");
+        return;
+      }
+      if (e.error !== "no-speech" && e.error !== "aborted") restartDelay = Math.min(restartDelay * 2, 5000);
+    };
+    recognition.onresult = (e) => {
+      if (speaking || busy || muted) return; // half-duplex: never react to our own voice
+      for (let i = e.resultIndex; i < e.results.length; i++) {
+        const result = e.results[i];
+        const top = result[0].transcript;
+        if (!result.isFinal) {
+          // Light the ring the moment the wake word is heard, like a real Echo.
+          if (WAKE.test(top) && device.dataset.state === "idle") { earcon.wake(); setState("awake", "Listening"); }
+          continue;
+        }
+        const alts = Array.from({ length: result.length }, (_, j) => result[j].transcript.trim()).filter(Boolean);
+        handleUtterance(alts);
+      }
+    };
+  }
+
+  function handleUtterance(alts) {
+    const now = Date.now();
+    const d = window.AlexaWake.decide(alts, { now, awakeUntil, followUpUntil });
+    if (d.action === "send") return send(d.text, d.alternatives);
+    if (d.action === "awake") {
+      if (device.dataset.state !== "awake") earcon.wake();
+      awakeUntil = now + AWAKE_MS;
+      return restState();
+    }
+    // Background talk without the wake word: ignore, but let the ring settle.
+    if (device.dataset.state === "awake") restState();
   }
 
   function startListening() {
-    if (!recognition || listening || busy) return;
-    stopSpeaking();
+    if (!recognition || listening || muted || speaking) return;
+    wantListening = true;
     recognition.lang = langSel.value;
     try { recognition.start(); } catch { /* already started */ }
   }
+  function pauseListening() { if (recognition && listening) recognition.abort(); }
+  function resumeListening() { if (wantListening && !muted) setTimeout(startListening, 150); }
 
-  function toggleListening() {
-    if (!recognition) { input.focus(); return; }
-    if (listening) recognition.stop(); else startListening();
+  // ---------- controls ----------
+  function toggleMute() {
+    muted = !muted;
+    if (muted) { pauseListening(); stopSpeaking(); setState("muted", "Microphone off"); }
+    else { setState("idle", "Microphone on"); startListening(); }
   }
 
-  // ---------- wiring ----------
-  micBtn.addEventListener("click", toggleListening);
-  document.addEventListener("keydown", (e) => {
-    const typing = e.target instanceof HTMLInputElement || e.target instanceof HTMLSelectElement || e.target instanceof HTMLTextAreaElement;
-    if (e.code === "Space" && !typing && !e.repeat) { e.preventDefault(); toggleListening(); }
-    if (e.key === "Escape") { stopSpeaking(); if (listening) recognition.abort(); setState("idle", "Stopped."); }
+  startBtn.addEventListener("click", async () => {
+    started = true;
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    startEl.hidden = true;
+    earcon.wake();
+    if (!recognition) {
+      setState("error", "Voice input needs Chrome or Edge. Press D to type instead.");
+      return;
+    }
+    setState("idle", "Ready. Say Alexa to talk.");
+    startListening();
   });
-  composer.addEventListener("submit", (e) => { e.preventDefault(); const t = input.value; input.value = ""; send(t); });
-  document.querySelectorAll(".chip").forEach((c) => c.addEventListener("click", () => send(c.dataset.say)));
 
-  $("reset-btn").addEventListener("click", () => {
+  device.addEventListener("click", () => { if (started) { if (speaking) stopSpeaking(); else toggleMute(); } });
+
+  document.addEventListener("keydown", (e) => {
+    if (e.target instanceof HTMLInputElement || e.target instanceof HTMLSelectElement) return;
+    if (e.key === "d" || e.key === "D") { debugEl.hidden = !debugEl.hidden; }
+    else if (e.key === "m" || e.key === "M") { if (started) toggleMute(); }
+    else if (e.key === "Escape") { stopSpeaking(); }
+    else if (e.code === "Space" && started && !muted) {
+      // Keyboard "action button": same as saying "Alexa".
+      e.preventDefault();
+      earcon.wake();
+      awakeUntil = Date.now() + AWAKE_MS;
+      restState();
+    }
+  });
+
+  $("close-debug").addEventListener("click", () => { debugEl.hidden = true; });
+  $("type-form").addEventListener("submit", (e) => {
+    e.preventDefault();
+    const input = $("type-input");
+    const t = input.value;
+    input.value = "";
+    if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    send(t, [t]);
+  });
+  $("new-session").addEventListener("click", () => {
     sessionId = newId();
     store.set("alexaChess.session", sessionId);
-    log.innerHTML = "";
-    empty.hidden = false;
-    gamePill.hidden = true;
-    stopSpeaking();
-    setState("idle", "New session. Say “Alexa, let’s play chess” to begin.");
-  });
-
-  const settings = $("settings"), settingsBtn = $("settings-btn");
-  settingsBtn.addEventListener("click", () => {
-    settings.hidden = !settings.hidden;
-    settingsBtn.setAttribute("aria-expanded", String(!settings.hidden));
+    debugLog.innerHTML = "";
+    live.textContent = "New session";
   });
   langSel.value = store.get("alexaChess.lang", "en-IN");
-  langSel.addEventListener("change", () => store.set("alexaChess.lang", langSel.value));
-  voiceSel.addEventListener("change", () => store.set("alexaChess.voice", voiceSel.value));
-  rate.value = store.get("alexaChess.rate", "1");
-  rateOut.textContent = Number(rate.value).toFixed(1);
-  rate.addEventListener("input", () => { rateOut.textContent = Number(rate.value).toFixed(1); store.set("alexaChess.rate", rate.value); });
-  mute.checked = store.get("alexaChess.mute", "0") === "1";
-  mute.addEventListener("change", () => store.set("alexaChess.mute", mute.checked ? "1" : "0"));
-  handsFree.checked = store.get("alexaChess.handsfree", "0") === "1";
-  handsFree.addEventListener("change", () => store.set("alexaChess.handsfree", handsFree.checked ? "1" : "0"));
+  langSel.addEventListener("change", () => {
+    store.set("alexaChess.lang", langSel.value);
+    if (listening) recognition.abort(); // restarts with the new language
+  });
+  if (!Recognition) startNote.textContent = "This browser has no speech recognition. Use Chrome or Edge, or press D to type.";
 
-  if ("speechSynthesis" in window) {
-    loadVoices();
-    speechSynthesis.addEventListener("voiceschanged", loadVoices);
-  }
-
+  // ---------- config + warm-up ----------
   fetch("config.json", { cache: "no-store" })
     .then((r) => r.json())
-    .then((c) => { agentUrl = c.agentUrl; })
-    .catch(() => setState("error", "Couldn't load config.json. Is the site deployed with scripts/deploy.ps1?"));
+    .then((c) => {
+      agentUrl = c.agentUrl;
+      // Wake the Lambdas while the user is still reading the start screen.
+      fetch(agentUrl, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ warm: true }) }).catch(() => {});
+    })
+    .catch(() => { startNote.textContent = "Couldn't load config.json. Deploy the site with scripts/deploy.ps1."; });
 })();

@@ -7,6 +7,8 @@ export interface Turn {
   text: string;
 }
 
+export type Chattiness = "minimal" | "brief" | "chatty";
+
 /** alexa_chess_sessions: one row per browser session. */
 export interface Session {
   sessionId: string;
@@ -14,6 +16,12 @@ export interface Session {
   humanColor?: string;
   level?: number;
   gameOver?: boolean;
+  /** How much Alexa comments: "minimal" | "brief" (default) | "chatty". */
+  chattiness?: Chattiness;
+  /** Polly voice id, e.g. "Kajal". */
+  voice?: string;
+  /** Speaking rate as a percentage, 100 = normal. */
+  rate?: number;
   turns: Turn[];
   updatedAt: string;
   expiresAt: number;

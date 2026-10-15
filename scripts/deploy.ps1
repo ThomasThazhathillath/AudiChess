@@ -1,9 +1,9 @@
 <#
   Builds and deploys the whole stack, then publishes the website.
-  Usage:  .\scripts\deploy.ps1 [-ModelId apac.amazon.nova-pro-v1:0] [-SkipBuild]
+  Usage:  .\scripts\deploy.ps1 [-ModelId global.amazon.nova-2-lite-v1:0] [-SkipBuild]
 #>
 param(
-  [string]$ModelId,
+  [string]$ModelId = "global.amazon.nova-2-lite-v1:0",  # always passed: CloudFormation otherwise keeps the previous value
   [string]$Profile = "default",
   [string]$Region = "ap-south-1",
   [string]$StackName = "alexa-chess",

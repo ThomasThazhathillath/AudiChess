@@ -9,7 +9,7 @@ import {
   material,
   moveToUci,
   piecesOf,
-  playHumanMove,
+  suggestMoves,
   readBoard,
   replay,
   sideToMoveSpoken,
@@ -17,13 +17,18 @@ import {
   statusOf,
   uciToObject,
 } from "./chess/game.js";
-import { LEVELS } from "./chess/engine.js";
+import { LEVELS, type SearchResult } from "./chess/engine.js";
+import { alertsFor, classifyMove, describeEval, forWhite, moveIdeas, type MoveQuality } from "./chess/analysis.js";
+import { currentOpening } from "./chess/openings.js";
+import { confirmQuestion, resolveSpokenMove } from "./chess/spokenMove.js";
 import { colorName, spokenMove, spokenPieceList } from "./chess/spoken.js";
 import type { GameRecord, GameStore, MoveRecord } from "./store.js";
 
 export interface Engine {
   move(uciMoves: string[], level: number): Promise<string>;
   best(uciMoves: string[]): Promise<string>;
+  /** Quick full-strength evaluation for commentary. */
+  analyse(uciMoves: string[]): Promise<SearchResult>;
 }
 
 export interface Deps {
@@ -74,7 +79,13 @@ export function createChessServer(deps: Deps): McpServer {
     return { game, moves, chess: replay(moves.map((m) => m.uci)) };
   }
 
-  async function record(game: GameRecord, chess: Chess, move: Move, by: "human" | "engine"): Promise<MoveRecord> {
+  async function record(
+    game: GameRecord,
+    chess: Chess,
+    move: Move,
+    by: "human" | "engine",
+    extra: Pick<MoveRecord, "evalCp" | "quality" | "bestSan" | "opening"> = {},
+  ): Promise<MoveRecord> {
     const ply = chess.history().length;
     const rec: MoveRecord = {
       gameId: game.gameId,
@@ -87,18 +98,31 @@ export function createChessServer(deps: Deps): McpServer {
       spoken: spokenMove(move),
       fenAfter: move.after,
       timestamp: now(),
+      ...extra,
     };
     await store.addMove(rec);
     return rec;
   }
 
-  async function playEngine(game: GameRecord, chess: Chess): Promise<MoveRecord> {
-    const uci = await engine.move(
-      chess.history({ verbose: true }).map((m) => moveToUci(m)),
-      game.level,
-    );
+  async function playEngine(game: GameRecord, chess: Chess): Promise<{ rec: MoveRecord; move: Move }> {
+    const uci = await engine.move(uciHistory(chess), game.level);
+    const openingBefore = currentOpening(chess)?.name;
     const move = chess.move(uciToObject(uci));
-    return record(game, chess, move, "engine");
+    const opening = currentOpening(chess)?.name;
+    const rec = await record(game, chess, move, "engine", opening && opening !== openingBefore ? { opening } : {});
+    return { rec, move };
+  }
+
+  const uciHistory = (chess: Chess) => chess.history({ verbose: true }).map((m) => moveToUci(m));
+
+  /** Evaluation failures must never block a move: commentary is optional. */
+  async function tryAnalyse(chess: Chess): Promise<SearchResult | undefined> {
+    try {
+      return await engine.analyse(uciHistory(chess));
+    } catch (err) {
+      console.error(JSON.stringify({ level: "warn", msg: "analysis failed", error: String(err) }));
+      return undefined;
+    }
   }
 
   async function saveState(game: GameRecord, chess: Chess, extra: Partial<GameRecord> = {}): Promise<GameRecord> {
@@ -161,7 +185,7 @@ export function createChessServer(deps: Deps): McpServer {
         let speech = `New game started. You are ${colorName(humanColor)}, and I'm playing at level ${level}, ${LEVELS[level].label}.`;
         let engineMoveRec: MoveRecord | undefined;
         if (humanColor === "b") {
-          engineMoveRec = await playEngine(game, chess);
+          engineMoveRec = (await playEngine(game, chess)).rec;
           game = await saveState(game, chess);
           speech += ` I open with ${engineMoveRec.spoken}. Your move.`;
         } else {
@@ -176,13 +200,14 @@ export function createChessServer(deps: Deps): McpServer {
     {
       title: "Play a move",
       description:
-        "Play the user's move, then the engine replies in the same call. Accepts SAN (Nf3, exd5, O-O, e8=Q) or UCI (g1f3, e7e8q). Illegal moves return legal suggestions.",
+        "Play the user's move, then the engine replies in the same call. Pass your best reading of the move as SAN (Nf3, exd5, O-O, e8=Q). The server also matches mis-heard speech ('night forever') to legal moves. If unsure it returns needsConfirmation with candidates: ask the user, then call again with the chosen SAN. The result includes commentary facts: opening reached, quality of the user's move, ideas behind the engine's reply, threats.",
       inputSchema: z.object({
         gameId: gameIdSchema,
-        move: z.string().min(2).describe("The user's move in SAN or UCI."),
+        move: z.string().min(1).describe("Your best reading of the user's move: SAN or UCI preferred, raw words accepted."),
+        alternatives: z.array(z.string()).max(5).optional().describe("Raw speech-recognition transcripts, best first."),
       }),
     },
-    ({ gameId, move }) =>
+    ({ gameId, move, alternatives }) =>
       guard(async () => {
         let { game, chess } = await load(gameId);
         if (game.status !== "active") throw new UserFacingError(`That game is already over (${game.status}). Start a new game to play again.`);
@@ -190,24 +215,73 @@ export function createChessServer(deps: Deps): McpServer {
         // Catch up if a previous engine reply was lost.
         if (chess.turn() !== game.humanColor) await playEngine(game, chess);
 
-        const human = playHumanMove(chess, move);
-        const humanRec = await record(game, chess, human, "human");
-        let speech = `You played ${humanRec.spoken}.`;
-        let engineRec: MoveRecord | undefined;
+        const resolution = resolveSpokenMove(chess, move, alternatives ?? []);
+        if (resolution.kind === "confirm") {
+          const speech = confirmQuestion(chess, resolution);
+          return ok({ speech, needsConfirmation: true, candidates: resolution.candidates, heard: resolution.heard });
+        }
+        if (resolution.kind === "none") {
+          const said = resolution.heard ?? move;
+          throw new IllegalMoveError(`"${said}" isn't a legal move here.`, suggestMoves(chess, move));
+        }
 
+        // Evaluate before and after the user's move to judge it.
+        const openingBefore = currentOpening(chess)?.name;
+        const before = await tryAnalyse(chess);
+        const human = chess.move(resolution.san);
+        const after = await tryAnalyse(chess);
+
+        let quality: MoveQuality | undefined;
+        let lossCp: number | undefined;
+        let bestSan: string | undefined;
+        let evalCp: number | undefined; // user's point of view, after their move
+        if (before?.scoreCp !== undefined && after?.scoreCp !== undefined) {
+          evalCp = -after.scoreCp;
+          ({ quality, lossCp } = classifyMove(before.scoreCp, evalCp, before.best === moveToUci(human)));
+          if (quality !== "best" && quality !== "good") {
+            try {
+              bestSan = new Chess(human.before).move(uciToObject(before.best)).san;
+            } catch {
+              /* engine suggestion not parseable: skip */
+            }
+          }
+        }
+        const humanOpening = currentOpening(chess)?.name;
+        const humanRec = await record(game, chess, human, "human", {
+          evalCp,
+          quality,
+          bestSan,
+          opening: humanOpening && humanOpening !== openingBefore ? humanOpening : undefined,
+        });
+
+        let speech = `You played ${humanRec.spoken}.`;
+        let reply: { rec: MoveRecord; move: Move } | undefined;
         if (statusOf(chess).status === "active") {
-          engineRec = await playEngine(game, chess);
-          speech += ` I play ${engineRec.spoken}.`;
+          reply = await playEngine(game, chess);
+          speech += ` I play ${reply.rec.spoken}.`;
         }
         game = await saveState(game, chess);
         const over = spokenGameOver(chess, game.humanColor);
         if (over) speech += ` ${over}`;
         else if (chess.inCheck()) speech += " You're in check.";
 
+        const newOpening = reply?.rec.opening ?? humanRec.opening;
+        const commentary = {
+          opening: newOpening ? { name: newOpening, reachedBy: reply?.rec.opening ? "my move" : "your move" } : undefined,
+          yourMove: quality
+            ? { quality, lossCp, betterWas: bestSan ? spokenMove(new Chess(human.before).move(bestSan)) : undefined }
+            : undefined,
+          myMoveIdeas: reply ? moveIdeas(reply.move, chess) : [],
+          position: evalCp !== undefined ? describeEval(forWhite(evalCp, game.humanColor)) : undefined,
+          alerts: alertsFor(chess, game.humanColor),
+        };
+
         return ok({
           speech,
           yourMove: humanRec.san,
-          engineMove: engineRec?.san,
+          engineMove: reply?.rec.san,
+          heardAs: resolution.via === "exact" ? undefined : resolution.heard,
+          commentary,
           status: game.status,
           result: game.result,
           gameOver: game.status !== "active",
@@ -215,6 +289,23 @@ export function createChessServer(deps: Deps): McpServer {
           moveNumber: chess.moveNumber(),
           fen: chess.fen(),
         });
+      }),
+  );
+
+  server.registerTool(
+    "set_level",
+    {
+      title: "Change difficulty",
+      description: `Change the engine's strength in the current game. Levels: ${levelList}.`,
+      inputSchema: z.object({ gameId: gameIdSchema, level: z.number().int().min(1).max(8) }),
+    },
+    ({ gameId, level }) =>
+      guard(async () => {
+        const { game } = await load(gameId);
+        if (game.status !== "active") throw new UserFacingError("That game is over. Start a new one and pick a level.");
+        await store.updateGame(gameId, { level, updatedAt: now() });
+        const direction = level > game.level ? "stronger" : level < game.level ? "gentler" : "the same";
+        return ok({ speech: `Okay, I'll play at level ${level}, ${LEVELS[level].label}.`, level, previousLevel: game.level, direction });
       }),
   );
 
@@ -332,10 +423,11 @@ export function createChessServer(deps: Deps): McpServer {
         const { game, chess } = await load(gameId);
         const mat = material(chess);
         const over = game.status === "resigned" ? "You resigned this game." : spokenGameOver(chess, game.humanColor);
+        const opening = currentOpening(chess)?.name;
         const speech = over
           ? `${over} ${mat.speech}`
-          : `Move ${chess.moveNumber()}. ${sideToMoveSpoken(chess, game.humanColor)} ${mat.speech}`;
-        return ok({ speech, status: game.status, result: game.result, moveNumber: chess.moveNumber(), material: mat, fen: chess.fen() });
+          : `Move ${chess.moveNumber()}. ${sideToMoveSpoken(chess, game.humanColor)} ${mat.speech}${opening ? ` We're in the ${opening}.` : ""}`;
+        return ok({ speech, status: game.status, result: game.result, moveNumber: chess.moveNumber(), material: mat, opening, level: game.level, fen: chess.fen() });
       }),
   );
 

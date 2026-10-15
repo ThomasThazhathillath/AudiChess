@@ -1,5 +1,5 @@
 import { createServer } from "node:http";
-import { bestMove, engineMove } from "./chess/engine.js";
+import { analyse, bestMove, engineMove } from "./chess/engine.js";
 import { handleMcpRequest } from "./http.js";
 import { MemoryGameStore } from "./store.js";
 
@@ -7,7 +7,7 @@ import { MemoryGameStore } from "./store.js";
 // npm run dev   ->  http://127.0.0.1:3001/mcp   (set MCP_TOKEN to require a bearer token)
 
 const port = Number(process.env.PORT ?? 3001);
-const deps = { store: new MemoryGameStore(), engine: { move: engineMove, best: bestMove } };
+const deps = { store: new MemoryGameStore(), engine: { move: engineMove, best: bestMove, analyse } };
 
 createServer(async (req, res) => {
   const chunks: Buffer[] = [];

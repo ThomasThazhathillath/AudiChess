@@ -6,11 +6,14 @@
   "scripts": {
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "chat": "node --import ./scripts/md-loader.mjs --import tsx scripts/chat.ts"
+    "chat": "node --import ./scripts/md-loader.mjs --import tsx scripts/chat.ts",
+    "dev": "node --import ./scripts/md-loader.mjs --import tsx scripts/dev-server.ts",
+    "ab": "node --import ./scripts/md-loader.mjs --import tsx scripts/ab.ts"
   },
   "dependencies": {
     "@aws-sdk/client-bedrock-runtime": "^3.1152.0",
     "@aws-sdk/client-dynamodb": "^3.1152.0",
+    "@aws-sdk/client-polly": "^3.1152.0",
     "@aws-sdk/client-secrets-manager": "^3.1152.0",
     "@aws-sdk/lib-dynamodb": "^3.1152.0",
     "@modelcontextprotocol/client": "^2.3.1",

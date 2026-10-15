@@ -9,8 +9,8 @@ Description: Alexa Chess - blind chess by voice. MCP server (Streamable HTTP), B
 Parameters:
   BedrockModelId:
     Type: String
-    Description: Bedrock model or APAC cross-region inference profile ID used by the agent (Amazon Nova Pro via the APAC profile).
-    Default: apac.amazon.nova-pro-v1:0
+    Description: Bedrock inference profile used by the agent. Nova 2 Lite won the A/B test (best banter, about $0.05 per game with prompt caching); apac.amazon.nova-pro-v1:0 and apac.amazon.nova-lite-v1:0 also work.
+    Default: global.amazon.nova-2-lite-v1:0
   AllowedOrigin:
     Type: String
     Description: Browser origin allowed to call the agent (the CloudFront URL once known).
@@ -193,6 +193,10 @@ Resources:
               Resource:
                 - arn:aws:bedrock:*::foundation-model/*
                 - !Sub arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:inference-profile/*
+            # Alexa's voice: Polly neural text-to-speech (SynthesizeSpeech has no resource-level scoping).
+            - Effect: Allow
+              Action: polly:SynthesizeSpeech
+              Resource: "*"
     Metadata:
       BuildMethod: esbuild
       BuildProperties:

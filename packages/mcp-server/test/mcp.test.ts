@@ -1,6 +1,6 @@
 import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { bestMove, engineMove } from "../src/chess/engine.js";
+import { analyse, bestMove, engineMove } from "../src/chess/engine.js";
 import { handleMcpRequest } from "../src/http.js";
 import type { Deps } from "../src/server.js";
 import { MemoryGameStore } from "../src/store.js";
@@ -22,7 +22,7 @@ const call = async (name: string, args: Record<string, unknown> = {}) => {
 
 beforeEach(async () => {
   store = new MemoryGameStore();
-  deps = { store, engine: { move: engineMove, best: bestMove } };
+  deps = { store, engine: { move: engineMove, best: bestMove, analyse } };
   client = new Client({ name: "test", version: "1.0.0" });
   const transport = new StreamableHTTPClientTransport(URL_, {
     requestInit: { headers: { authorization: `Bearer ${TOKEN}` } },
@@ -39,7 +39,7 @@ describe("transport and auth", () => {
   it("lists all chess tools", async () => {
     const { tools } = await client.listTools();
     expect(tools.map((t) => t.name).sort()).toEqual(
-      ["describe_square", "game_history", "game_status", "hint", "last_moves", "legal_moves", "list_pieces", "make_move", "new_game", "read_board", "resign", "undo"].sort(),
+      ["describe_square", "game_history", "game_status", "hint", "last_moves", "legal_moves", "list_pieces", "make_move", "new_game", "read_board", "resign", "set_level", "undo"].sort(),
     );
   });
 
@@ -93,7 +93,7 @@ describe("playing a game", () => {
     const game = await call("new_game", { color: "white", level: 1 });
     const bad = await call("make_move", { gameId: game.gameId, move: "Ke2" });
     expect(bad.isError).toBe(true);
-    expect(bad.speech).toContain("not a legal move");
+    expect(bad.speech).toContain("isn't a legal move here");
     expect(store.moves.get(game.gameId) ?? []).toHaveLength(0);
   }, 30_000);
 
@@ -124,5 +124,61 @@ describe("playing a game", () => {
     const r = await call("read_board", { gameId: "nope" });
     expect(r.isError).toBe(true);
     expect(r.speech).toContain("can't find a game");
+  });
+});
+
+describe("conversation features", () => {
+  /** Engine that plays a fixed script of UCI replies (analysis stays real Stockfish). */
+  const scriptEngine = (...replies: string[]) => {
+    deps.engine = { ...deps.engine, move: async () => replies.shift() ?? (await engineMove([], 1)) };
+  };
+
+  it("names the opening the engine's reply creates (the Sicilian)", async () => {
+    scriptEngine("c7c5");
+    const game = await call("new_game", { color: "white", level: 3 });
+    const r = await call("make_move", { gameId: game.gameId, move: "e4" });
+    expect(r.engineMove).toBe("c5");
+    expect(r.commentary.opening).toEqual({ name: "Sicilian Defense", reachedBy: "my move" });
+    expect(r.commentary.yourMove.quality).toMatch(/best|good/);
+    expect(store.moves.get(game.gameId)![1].opening).toBe("Sicilian Defense");
+    expect((await call("game_status", { gameId: game.gameId })).speech).toContain("Sicilian Defense");
+  }, 30_000);
+
+  it("flags a blunder and says what was better", async () => {
+    scriptEngine("e7e5", "d8h4");
+    const game = await call("new_game", { color: "white", level: 3 });
+    await call("make_move", { gameId: game.gameId, move: "e4" });
+    // 2.Qh5?? is not a blunder, but 2.Ba6?? hangs a bishop for nothing.
+    const r = await call("make_move", { gameId: game.gameId, move: "Ba6" });
+    expect(r.commentary.yourMove.quality).toMatch(/mistake|blunder/);
+    expect(r.commentary.yourMove.betterWas).toBeTruthy();
+    const rec = store.moves.get(game.gameId)!.find((m) => m.san === "Ba6")!;
+    expect(rec.quality).toMatch(/mistake|blunder/);
+    expect(rec.bestSan).toBeTruthy();
+    expect(typeof rec.evalCp).toBe("number");
+  }, 30_000);
+
+  it("matches misheard speech through alternatives", async () => {
+    scriptEngine("e7e5");
+    const game = await call("new_game", { color: "white", level: 3 });
+    const r = await call("make_move", { gameId: game.gameId, move: "night f three", alternatives: ["night f three", "knight f3"] });
+    expect(r.isError).toBe(false);
+    expect(r.yourMove).toBe("Nf3");
+  }, 30_000);
+
+  it("asks for confirmation instead of guessing, and records nothing", async () => {
+    const game = await call("new_game", { color: "white", level: 3 });
+    const r = await call("make_move", { gameId: game.gameId, move: "knight to f5", alternatives: ["knight to f5"] });
+    expect(r.isError).toBe(false);
+    expect(r.needsConfirmation).toBe(true);
+    expect(r.speech).toMatch(/Did you mean/);
+    expect(store.moves.get(game.gameId) ?? []).toHaveLength(0);
+  }, 30_000);
+
+  it("changes difficulty mid-game", async () => {
+    const game = await call("new_game", { color: "white", level: 3 });
+    const r = await call("set_level", { gameId: game.gameId, level: 6 });
+    expect(r).toMatchObject({ level: 6, previousLevel: 3, direction: "stronger" });
+    expect(store.games.get(game.gameId)!.level).toBe(6);
   });
 });

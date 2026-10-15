@@ -33,22 +33,38 @@ function getEngine(): StockfishInstance {
   return engine;
 }
 
-/** Runs one UCI search and resolves with the best move. Searches are serialized: the engine is single-threaded. */
-function search(commands: string[], timeoutMs: number): Promise<string> {
+export interface SearchResult {
+  best: string;
+  /** Score for the side to move, in centipawns (mate scores folded into +/-100000 - plies). */
+  scoreCp?: number;
+  /** Moves to mate for the side to move (negative: getting mated). */
+  mate?: number;
+}
+
+/** Runs one UCI search and resolves with the best move and the last reported score. Searches are serialized: the engine is single-threaded. */
+function search(commands: string[], timeoutMs: number): Promise<SearchResult> {
   const run = () =>
-    new Promise<string>((resolve, reject) => {
+    new Promise<SearchResult>((resolve, reject) => {
       const sf = getEngine();
+      let scoreCp: number | undefined;
+      let mate: number | undefined;
       const timer = setTimeout(() => {
         sf.processCommand("stop");
         reject(new Error("Stockfish timed out"));
       }, timeoutMs);
       sf.listener = (line: string) => {
+        const info = / score (cp|mate) (-?\d+)/.exec(line);
+        if (info && line.startsWith("info")) {
+          if (info[1] === "cp") { scoreCp = Number(info[2]); mate = undefined; }
+          else { mate = Number(info[2]); scoreCp = Math.sign(mate || -1) * (100000 - Math.abs(mate) * 10); }
+          return;
+        }
         const m = /^bestmove (\S+)/.exec(line);
         if (!m) return;
         clearTimeout(timer);
         sf.listener = undefined;
         if (m[1] === "(none)") reject(new Error("No legal moves"));
-        else resolve(m[1]);
+        else resolve({ best: m[1], scoreCp, mate });
       };
       for (const cmd of commands) sf.processCommand(cmd);
     });
@@ -73,9 +89,9 @@ function strengthCommands(level: number): string[] {
 }
 
 /** The engine's reply for the given level. `uciMoves` is the full game so far from the start position. */
-export function engineMove(uciMoves: string[], level: number): Promise<string> {
+export async function engineMove(uciMoves: string[], level: number): Promise<string> {
   const cfg = LEVELS[level] ?? LEVELS[4];
-  return search(
+  const r = await search(
     [
       ...strengthCommands(level),
       "ucinewgame",
@@ -84,16 +100,30 @@ export function engineMove(uciMoves: string[], level: number): Promise<string> {
     ],
     cfg.movetimeMs + 10_000,
   );
+  return r.best;
 }
 
 /** Full-strength suggestion for the side to move (used by the hint tool). */
-export function bestMove(uciMoves: string[]): Promise<string> {
-  return search(
+export async function bestMove(uciMoves: string[]): Promise<string> {
+  const r = await search(
     [
       ...strengthCommands(8),
       `position startpos${uciMoves.length ? ` moves ${uciMoves.join(" ")}` : ""}`,
       "go depth 12 movetime 1500",
     ],
     12_000,
+  );
+  return r.best;
+}
+
+/** Quick full-strength evaluation of the position after `uciMoves`, for commentary (≈100–400 ms). */
+export function analyse(uciMoves: string[], depth = 10): Promise<SearchResult> {
+  return search(
+    [
+      ...strengthCommands(8),
+      `position startpos${uciMoves.length ? ` moves ${uciMoves.join(" ")}` : ""}`,
+      `go depth ${depth} movetime 400`,
+    ],
+    8_000,
   );
 }

@@ -1,13 +1,13 @@
 import { GetSecretValueCommand, SecretsManagerClient } from "@aws-sdk/client-secrets-manager";
 import type { LambdaFunctionURLEvent, LambdaFunctionURLResult } from "aws-lambda";
-import { bestMove, engineMove } from "./chess/engine.js";
+import { analyse, bestMove, engineMove } from "./chess/engine.js";
 import { handleMcpRequest } from "./http.js";
 import type { Deps } from "./server.js";
 import { DynamoGameStore } from "./store.js";
 
 const deps: Deps = {
   store: new DynamoGameStore(),
-  engine: { move: engineMove, best: bestMove },
+  engine: { move: engineMove, best: bestMove, analyse },
 };
 
 let tokenPromise: Promise<string> | undefined;

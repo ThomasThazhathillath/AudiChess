@@ -37,6 +37,14 @@ export interface MoveRecord {
   spoken: string;
   fenAfter: string;
   timestamp: string;
+  /** Human moves: evaluation after the move, in centipawns from the user's point of view. */
+  evalCp?: number;
+  /** Human moves: how good the move was. */
+  quality?: "best" | "good" | "inaccuracy" | "mistake" | "blunder";
+  /** Human moves: the engine's preferred move when this one was worse. */
+  bestSan?: string;
+  /** Set on the ply where the game first reached this named opening. */
+  opening?: string;
 }
 
 export interface GameStore {

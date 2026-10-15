@@ -68,7 +68,7 @@ export function playHumanMove(chess: Chess, input: string): Move {
 }
 
 /** Legal alternatives that share the target square or piece type with what was asked for. */
-function suggestMoves(chess: Chess, raw: string): string[] {
+export function suggestMoves(chess: Chess, raw: string): string[] {
   const legal = chess.moves({ verbose: true });
   const squares = raw.toLowerCase().match(/[a-h][1-8]/g) ?? [];
   const target = squares[squares.length - 1];

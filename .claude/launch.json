@@ -1,0 +1,23 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "mcp-local",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["run", "dev", "--prefix", "packages/mcp-server"],
+      "port": 3001
+    },
+    {
+      "name": "agent-local",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["run", "dev", "--prefix", "packages/agent"],
+      "port": 3002
+    },
+    {
+      "name": "web-local",
+      "runtimeExecutable": "node",
+      "runtimeArgs": ["scripts/serve-web.mjs"],
+      "port": 5173
+    }
+  ]
+}
