@@ -1,0 +1,294 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: Alexa Chess - blind chess by voice. MCP server (Streamable HTTP), Bedrock agent, Echo simulator website.
+
+# Naming: everything is prefixed alexa_chess. CloudFormation stack names and S3 bucket names
+# don't allow underscores (and buckets must be lowercase and globally unique), so those two use
+# "alexa-chess" / "alexa-chess-website-bucket".
+
+Parameters:
+  BedrockModelId:
+    Type: String
+    Description: Bedrock model or APAC cross-region inference profile ID used by the agent (Amazon Nova Pro via the APAC profile).
+    Default: apac.amazon.nova-pro-v1:0
+  AllowedOrigin:
+    Type: String
+    Description: Browser origin allowed to call the agent (the CloudFront URL once known).
+    Default: "*"
+
+Globals:
+  Function:
+    Runtime: nodejs22.x
+    Architectures: [arm64]
+    Tracing: Active
+    Environment:
+      Variables:
+        GAMES_TABLE: !Ref GamesTable
+        MOVES_TABLE: !Ref MovesTable
+        SESSIONS_TABLE: !Ref SessionsTable
+        LOG_LEVEL: info
+        NODE_OPTIONS: --enable-source-maps
+
+Resources:
+  # ---------- Data ----------
+  # One item per game: players, level, current FEN, status, result, timestamps.
+  GamesTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: alexa_chess_games
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - { AttributeName: gameId, AttributeType: S }
+      KeySchema:
+        - { AttributeName: gameId, KeyType: HASH }
+
+  # One item per half-move (ply): gameId + ply number. Full replayable game history.
+  MovesTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: alexa_chess_moves
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - { AttributeName: gameId, AttributeType: S }
+        - { AttributeName: ply, AttributeType: N }
+      KeySchema:
+        - { AttributeName: gameId, KeyType: HASH }
+        - { AttributeName: ply, KeyType: RANGE }
+
+  # Agent conversation per browser session (current gameId + recent turns). Expires after 7 days.
+  SessionsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: alexa_chess_sessions
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - { AttributeName: sessionId, AttributeType: S }
+      KeySchema:
+        - { AttributeName: sessionId, KeyType: HASH }
+      TimeToLiveSpecification:
+        AttributeName: expiresAt
+        Enabled: true
+
+  McpAuthSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: alexa_chess_mcp_token
+      Description: Bearer token required by the alexa_chess MCP server.
+      GenerateSecretString:
+        PasswordLength: 40
+        ExcludePunctuation: true
+
+  # ---------- MCP server ----------
+  StockfishLayer:
+    Type: AWS::Serverless::LayerVersion
+    Properties:
+      LayerName: alexa_chess_stockfish
+      Description: Stockfish chess engine (WASM build from npm)
+      ContentUri: layers/stockfish
+      CompatibleRuntimes: [nodejs22.x]
+      CompatibleArchitectures: [arm64]
+      RetentionPolicy: Delete
+    Metadata:
+      BuildMethod: nodejs22.x
+      BuildArchitecture: arm64
+
+  McpLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /aws/lambda/alexa_chess_mcp_server
+      RetentionInDays: 14
+
+  McpServerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: alexa_chess_mcp_server
+      Description: Chess MCP server over Streamable HTTP (stateless JSON mode)
+      CodeUri: packages/mcp-server
+      Handler: handler.handler
+      MemorySize: 1536
+      Timeout: 30
+      Layers: [!Ref StockfishLayer]
+      LoggingConfig:
+        LogFormat: JSON
+        LogGroup: !Ref McpLogGroup
+      Environment:
+        Variables:
+          MCP_SECRET_ARN: !Ref McpAuthSecret
+      FunctionUrlConfig:
+        AuthType: NONE
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref GamesTable
+        - DynamoDBCrudPolicy:
+            TableName: !Ref MovesTable
+        - AWSSecretsManagerGetSecretValuePolicy:
+            SecretArn: !Ref McpAuthSecret
+    Metadata:
+      BuildMethod: esbuild
+      BuildProperties:
+        Format: esm
+        OutExtension: [.js=.mjs]
+        Target: es2022
+        Minify: false
+        Sourcemap: true
+        EntryPoints: [src/handler.ts]
+        External: [stockfish, "@aws-sdk/*"]
+        Banner:
+          - js=import { createRequire } from 'module'; const require = createRequire(import.meta.url);
+
+  # Public Function URLs also need lambda:InvokeFunction for the URL principal.
+  McpServerUrlInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref McpServerFunction
+      Principal: "*"
+      InvokedViaFunctionUrl: true
+
+  # ---------- Agent ----------
+  AgentLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /aws/lambda/alexa_chess_agent
+      RetentionInDays: 14
+
+  AgentFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: alexa_chess_agent
+      Description: Bedrock agent - understands speech, calls chess MCP tools
+      CodeUri: packages/agent
+      Handler: handler.handler
+      MemorySize: 1024
+      Timeout: 60
+      LoggingConfig:
+        LogFormat: JSON
+        LogGroup: !Ref AgentLogGroup
+      Environment:
+        Variables:
+          MCP_URL: !Sub "${McpServerFunctionUrl.FunctionUrl}mcp"
+          MCP_SECRET_ARN: !Ref McpAuthSecret
+          MODEL_ID: !Ref BedrockModelId
+      FunctionUrlConfig:
+        AuthType: NONE
+        Cors:
+          AllowOrigins: [!Ref AllowedOrigin]
+          AllowMethods: [POST]
+          AllowHeaders: [content-type]
+          MaxAge: 300
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref SessionsTable
+        - DynamoDBReadPolicy:
+            TableName: !Ref GamesTable
+        - DynamoDBReadPolicy:
+            TableName: !Ref MovesTable
+        - AWSSecretsManagerGetSecretValuePolicy:
+            SecretArn: !Ref McpAuthSecret
+        - Statement:
+            - Effect: Allow
+              Action:
+                - bedrock:InvokeModel
+                - bedrock:InvokeModelWithResponseStream
+              Resource:
+                - arn:aws:bedrock:*::foundation-model/*
+                - !Sub arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:inference-profile/*
+    Metadata:
+      BuildMethod: esbuild
+      BuildProperties:
+        Format: esm
+        OutExtension: [.js=.mjs]
+        Target: es2022
+        Minify: false
+        Sourcemap: true
+        EntryPoints: [src/handler.ts]
+        External: ["@aws-sdk/*"]
+        Loader: [.md=text]
+        Banner:
+          - js=import { createRequire } from 'module'; const require = createRequire(import.meta.url);
+
+  AgentUrlInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref AgentFunction
+      Principal: "*"
+      InvokedViaFunctionUrl: true
+
+  # ---------- Website (S3 + CloudFront) ----------
+  WebsiteBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: alexa-chess-website-bucket
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+
+  WebsiteOAC:
+    Type: AWS::CloudFront::OriginAccessControl
+    Properties:
+      OriginAccessControlConfig:
+        Name: alexa_chess_oac
+        OriginAccessControlOriginType: s3
+        SigningBehavior: always
+        SigningProtocol: sigv4
+
+  WebsiteDistribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        Comment: alexa_chess Echo simulator
+        DefaultRootObject: index.html
+        PriceClass: PriceClass_200
+        HttpVersion: http2and3
+        Origins:
+          - Id: alexa_chess_website
+            DomainName: !GetAtt WebsiteBucket.RegionalDomainName
+            OriginAccessControlId: !GetAtt WebsiteOAC.Id
+            S3OriginConfig:
+              OriginAccessIdentity: ""
+        DefaultCacheBehavior:
+          TargetOriginId: alexa_chess_website
+          ViewerProtocolPolicy: redirect-to-https
+          Compress: true
+          AllowedMethods: [GET, HEAD]
+          CachePolicyId: 658327ea-f89d-4fab-a63d-7e88639e58f6 # Managed-CachingOptimized
+
+  WebsiteBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref WebsiteBucket
+      PolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal: { Service: cloudfront.amazonaws.com }
+            Action: s3:GetObject
+            Resource: !Sub ${WebsiteBucket.Arn}/*
+            Condition:
+              StringEquals:
+                AWS:SourceArn: !Sub arn:aws:cloudfront::${AWS::AccountId}:distribution/${WebsiteDistribution}
+
+Outputs:
+  McpServerUrl:
+    Description: MCP Streamable HTTP endpoint
+    Value: !Sub "${McpServerFunctionUrl.FunctionUrl}mcp"
+  AgentUrl:
+    Description: Agent chat endpoint (POST)
+    Value: !GetAtt AgentFunctionUrl.FunctionUrl
+  WebsiteUrl:
+    Description: Echo simulator
+    Value: !Sub https://${WebsiteDistribution.DomainName}
+  WebsiteBucketName:
+    Value: !Ref WebsiteBucket
+  DistributionId:
+    Value: !Ref WebsiteDistribution
+  McpAuthSecretArn:
+    Description: Secrets Manager ARN holding the MCP bearer token
+    Value: !Ref McpAuthSecret

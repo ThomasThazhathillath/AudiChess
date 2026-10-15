@@ -1,0 +1,12 @@
+{
+  "name": "alexa_chess_stockfish",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Lambda layer: Stockfish 'lite single-threaded' WASM engine. The ~95MB full-network builds are deleted after install to keep the layer small.",
+  "scripts": {
+    "postinstall": "node -e \"const fs=require('fs'),p=require('path'),d=p.join('node_modules','stockfish','bin');for(const f of fs.readdirSync(d)){if(!f.includes('lite-single'))fs.rmSync(p.join(d,f))}\""
+  },
+  "dependencies": {
+    "stockfish": "^19.0.1"
+  }
+}
