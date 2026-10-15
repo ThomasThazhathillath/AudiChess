@@ -61,7 +61,7 @@ Alexa+ Chess/
 │      ├─ bedrock.ts             # Converse API loop with tool use
 │      ├─ mcpClient.ts           # @modelcontextprotocol/sdk client, HTTP transport
 │      └─ history.ts             # chat history in DynamoDB
-├─ skills/blind-chess/SKILL.md   # Agent Skill: narration + disambiguation rules
+│  └─ agent/skills/blind-chess/SKILL.md  # Agent Skill (bundled into the agent Lambda)
 ├─ web/                          # static Echo simulator (index.html, app.js, styles.css)
 └─ scripts/
    ├─ deploy.ps1                 # sam build + deploy + publish web + write config.json
@@ -172,7 +172,7 @@ Write `template.yaml` with stub handlers, so the whole stack deploys and gets it
 
 ## Phase 3: Agent + Echo simulator web page
 
-**Agent Skill:** `skills/blind-chess/SKILL.md` (agentskills.io format with YAML frontmatter `name`, `description`). Rules:
+**Agent Skill:** `packages/agent/skills/blind-chess/SKILL.md` (inside the agent package because SAM only bundles files under each function's CodeUri) (agentskills.io format with YAML frontmatter `name`, `description`). Rules:
 - Turn speech into SAN. Spoken files and pieces get confused ("bee/dee/e", "night"), so ask a confirm question when unsure.
 - Always repeat the move back.
 - Never show board diagrams, keep replies short for the ear.
@@ -194,6 +194,8 @@ The agent Lambda bundles the skill (esbuild text loader) into its system prompt.
 - `webkitSpeechRecognition` (en-IN/en-US selectable) gives the transcript, which is POSTed to `/chat`. The reply is read by `speechSynthesis`, and the mic re-arms automatically for the next move.
 - Side panel: conversation transcript, plus a text box fallback (for browsers without speech recognition and for judges). No board, since the game is blind; the "reveal board" button only prints the FEN after the game ends.
 - `sessionId` is kept in `localStorage`; `config.json` (from the deploy script) gives `agentUrl`.
+
+**Phase 3 status: ✅ deployed 2026-10-15.** The Nova Pro agent is live: it hides ids from the model, injects the current gameId, and forces a tool call on every turn while a game is running. Without that, Nova once "played" a move from memory without calling the server. 5 agent unit tests pass. A local `npm run chat` run uses real Bedrock with the live MCP server. The Echo page is live with ring states, chips, a tool-call trace, hands-free mode, settings, keyboard control and aria-live regions. Verified: text and chip flows from the browser (new game, e4 with engine reply, read board), the session survives a reload, and replies take ~1.3–2 s warm (~3.5 s cold). **Not yet verified:** microphone input in a real Chrome window.
 
 **Phase 3 done when:** in Chrome at `WebsiteUrl`, saying "Alexa, start a new game, I'll play white, easy" → "pawn to e4" → "where's the black queen?" → "read me the board" all get correct spoken replies, and a full game can reach checkmate or resignation.
 

@@ -4,13 +4,24 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "chat": "node --import ./scripts/md-loader.mjs --import tsx scripts/chat.ts"
   },
-  "dependencies": {},
+  "dependencies": {
+    "@aws-sdk/client-bedrock-runtime": "^3.1152.0",
+    "@aws-sdk/client-dynamodb": "^3.1152.0",
+    "@aws-sdk/client-secrets-manager": "^3.1152.0",
+    "@aws-sdk/lib-dynamodb": "^3.1152.0",
+    "@modelcontextprotocol/client": "^2.3.1",
+    "zod": "^4.6.7"
+  },
   "devDependencies": {
     "@types/aws-lambda": "^8.10.164",
     "@types/node": "^22.0.0",
     "esbuild": "^0.28.2",
-    "typescript": "^5.9.0"
+    "tsx": "^4.23.15",
+    "typescript": "^5.9.0",
+    "vitest": "^5.0.4"
   }
 }

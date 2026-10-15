@@ -3,17 +3,106 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Blind Chess</title>
-  <style>
-    body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: #0b0f14; color: #e6edf3; font-family: system-ui, sans-serif; }
-    .ring { width: 160px; height: 160px; border-radius: 50%; border: 10px solid #1fb6ff; box-shadow: 0 0 40px #1fb6ff88; }
-    p { text-align: center; color: #8b98a5; }
-  </style>
+  <title>Alexa Chess</title>
+  <meta name="description" content="Play blind chess by voice with a simulated Alexa+ device, powered by an MCP server on AWS.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Ccircle cx='32' cy='32' r='26' fill='%23111827' stroke='%2300caff' stroke-width='8'/%3E%3C/svg%3E">
 </head>
 <body>
-  <main>
-    <div class="ring"></div>
-    <p>Alexa+ Blind Chess is coming soon.</p>
+  <a class="skip" href="#composer-input">Skip to text input</a>
+
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-dot" aria-hidden="true"></span>
+      <span>Alexa Chess</span>
+      <span class="badge">Blind chess · MCP on AWS</span>
+    </div>
+    <div class="topbar-actions">
+      <button id="settings-btn" class="ghost" aria-expanded="false" aria-controls="settings">Settings</button>
+      <button id="reset-btn" class="ghost" title="Forget this conversation and start fresh">New session</button>
+    </div>
+  </header>
+
+  <main class="layout">
+    <section class="stage" aria-label="Simulated Echo device">
+      <div id="device" class="device" data-state="idle">
+        <div class="ring" aria-hidden="true">
+          <div class="ring-glow"></div>
+          <div class="ring-sweep"></div>
+        </div>
+        <button id="mic-btn" class="device-top" aria-label="Talk to Alexa (Space)" aria-describedby="status">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 15a3 3 0 0 0 3-3V6a3 3 0 1 0-6 0v6a3 3 0 0 0 3 3Zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 6 6.92V21h2v-2.08A7 7 0 0 0 19 12h-2Z"/></svg>
+        </button>
+        <div class="device-body" aria-hidden="true"></div>
+      </div>
+
+      <p id="status" class="status" role="status" aria-live="polite">Press the button or hold Space, then say “Alexa, let’s play chess”.</p>
+      <p id="caption" class="caption" aria-hidden="true"></p>
+
+      <div class="chips" role="group" aria-label="Try saying">
+        <button class="chip" data-say="Alexa, start a new game. I'll play white, easy please.">“Start a new game”</button>
+        <button class="chip" data-say="Pawn to e4">“Pawn to e4”</button>
+        <button class="chip" data-say="Knight to f3">“Knight to f3”</button>
+        <button class="chip" data-say="Where is the black queen?">“Where’s the black queen?”</button>
+        <button class="chip" data-say="Read me the board">“Read me the board”</button>
+        <button class="chip" data-say="What was your last move?">“Your last move?”</button>
+        <button class="chip" data-say="Give me a hint">“Give me a hint”</button>
+        <button class="chip" data-say="Take that back">“Take that back”</button>
+      </div>
+
+      <div class="hands-free">
+        <label class="switch">
+          <input type="checkbox" id="handsfree">
+          <span class="slider" aria-hidden="true"></span>
+          <span>Hands-free: listen again after each reply</span>
+        </label>
+      </div>
+    </section>
+
+    <section class="panel" aria-label="Conversation">
+      <div class="panel-head">
+        <h1>Conversation</h1>
+        <span id="game-pill" class="pill" hidden>Game in progress</span>
+      </div>
+      <ol id="log" class="log" aria-live="polite" aria-relevant="additions"></ol>
+      <div id="empty" class="empty">
+        <p><strong>Play chess without a board.</strong> Speak your moves; Alexa answers with Stockfish’s reply and remembers every move, stored in DynamoDB.</p>
+        <p>Every reply below shows which MCP tools the agent called on the chess server.</p>
+      </div>
+      <form id="composer" class="composer" autocomplete="off">
+        <label for="composer-input" class="sr-only">Type instead of speaking</label>
+        <input id="composer-input" type="text" maxlength="500" placeholder="Type a command, e.g. bishop to c4">
+        <button type="submit" class="primary">Send</button>
+      </form>
+    </section>
   </main>
+
+  <aside id="settings" class="settings" hidden>
+    <h2>Settings</h2>
+    <label>Recognition language
+      <select id="lang">
+        <option value="en-IN">English (India)</option>
+        <option value="en-US">English (US)</option>
+        <option value="en-GB">English (UK)</option>
+      </select>
+    </label>
+    <label>Voice
+      <select id="voice"></select>
+    </label>
+    <label>Speaking rate <output id="rate-out">1.0</output>
+      <input id="rate" type="range" min="0.7" max="1.4" step="0.1" value="1">
+    </label>
+    <label class="check"><input type="checkbox" id="mute"> Mute voice (text only)</label>
+    <p class="hint">Speech recognition needs Chrome or Edge. Other browsers can use the text box.</p>
+  </aside>
+
+  <footer class="footer">
+    Browser speech → Amazon Bedrock (Nova Pro) agent → chess MCP server over Streamable HTTP → Stockfish on AWS Lambda.
+  </footer>
+
+  <script src="app.js"></script>
 </body>
 </html>
