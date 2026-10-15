@@ -134,7 +134,7 @@ Resources:
         EntryPoints: [src/handler.ts]
         External: [stockfish, "@aws-sdk/*"]
         Banner:
-          - js=import { createRequire } from 'module'; const require = createRequire(import.meta.url);
+          - js=import { createRequire as __bannerCreateRequire } from 'module'; const require = __bannerCreateRequire(import.meta.url);
 
   # Public Function URLs also need lambda:InvokeFunction for the URL principal.
   McpServerUrlInvokePermission:
@@ -205,7 +205,7 @@ Resources:
         External: ["@aws-sdk/*"]
         Loader: [.md=text]
         Banner:
-          - js=import { createRequire } from 'module'; const require = createRequire(import.meta.url);
+          - js=import { createRequire as __bannerCreateRequire } from 'module'; const require = __bannerCreateRequire(import.meta.url);
 
   AgentUrlInvokePermission:
     Type: AWS::Lambda::Permission

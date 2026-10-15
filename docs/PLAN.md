@@ -65,7 +65,7 @@ Alexa+ Chess/
 ├─ web/                          # static Echo simulator (index.html, app.js, styles.css)
 └─ scripts/
    ├─ deploy.ps1                 # sam build + deploy + publish web + write config.json
-   └─ smoke-mcp.ps1              # curl-style JSON-RPC checks against deployed /mcp
+   └─ (packages/mcp-server/scripts/smoke.ts)  # official MCP client smoke test: npm run smoke -- <url> <token>
 ```
 
 ---
@@ -131,7 +131,7 @@ Write `template.yaml` with stub handlers, so the whole stack deploys and gets it
 
 ## Phase 2: MCP server (Streamable HTTP on Lambda)
 
-**Dependencies:** `@modelcontextprotocol/sdk`, `zod`, `chess.js`, `@aws-sdk/client-dynamodb` + `lib-dynamodb`, `@aws-sdk/client-secrets-manager`. The layer provides `stockfish` (WASM, single-threaded build).
+**Dependencies:** `@modelcontextprotocol/server` v2 (`McpServer` + `WebStandardStreamableHTTPServerTransport`), `zod` v4, `chess.js`, AWS SDK v3 (provided by the Lambda runtime, so left out of the bundle). The layer provides `stockfish` (lite single-threaded WASM). Dev: `@modelcontextprotocol/client` v2, `vitest`, `tsx`.
 
 **Transport (`handler.ts`):**
 - On each request, create `McpServer` + `StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true })`.
@@ -164,8 +164,10 @@ Write `template.yaml` with stub handlers, so the whole stack deploys and gets it
 
 **Tests:** vitest for `game.ts` (spoken output, illegal moves, castling, promotion) and `engine.ts` (returns a legal move from a given FEN).
 
+**Phase 2 status: ✅ deployed 2026-10-15.** 12 tools live at the McpServerUrl. 19 vitest tests pass (unit tests plus end-to-end through the real transport with Stockfish). The live smoke test passed: 401 without a token, 403 for browser origins, 405 for GET. Every move is confirmed as a row in `alexa_chess_moves`. Engine replies take about 0.3–0.7 s warm. Local dev: `npm run dev` serves `http://127.0.0.1:3001/mcp` with in-memory games.
+
 **Phase 2 done when:**
-- `scripts/smoke-mcp.ps1` against the deployed URL succeeds for `initialize`, `tools/list` and `tools/call new_game` → `make_move e4` (engine replies).
+- `npm run smoke -- <McpServerUrl> <token>` (official MCP client) succeeds for initialize, tools/list, new_game → make_move → history.
 - The official **MCP Inspector** (`npx @modelcontextprotocol/inspector`, Streamable HTTP, bearer header) lists and calls the tools.
 
 ## Phase 3: Agent + Echo simulator web page
