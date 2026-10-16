@@ -1,4 +1,4 @@
-import { Chess, type Move, type PieceSymbol } from "chess.js";
+import { Chess, type Move, type PieceSymbol, type Square } from "chess.js";
 import { playHumanMove } from "./game.js";
 import { spokenMove } from "./spoken.js";
 
@@ -32,12 +32,30 @@ type Token =
 
 const PIECE_WORDS: Record<string, PieceSymbol> = {
   knight: "n", knights: "n", night: "n", nights: "n", nite: "n", knite: "n", kite: "n", horse: "n", neigh: "n", nate: "n",
-  bishop: "b", bishops: "b", bish: "b", bishup: "b", fish: "b",
+  nighty: "n", ninety: "n",
+  bishop: "b", bishops: "b", bish: "b", bishup: "b", fish: "b", rishabh: "b", rishab: "b", wishup: "b",
   rook: "r", rooks: "r", rock: "r", rocks: "r", ruck: "r", brook: "r", roo: "r", look: "r", ruk: "r",
+  rocky: "r", rok: "r", rocket: "r", rope: "r", rooked: "r", book: "r", bruk: "r", rukh: "r", rooke: "r", rookie: "r", roque: "r", rak: "r",
+  pawan: "p", pavan: "p", pahn: "p",
   queen: "q", queens: "q", quinn: "q", green: "q", kween: "q",
   king: "k", kings: "k",
   pawn: "p", pawns: "p", pond: "p", porn: "p", paun: "p", prawn: "p", pon: "p", palm: "p", pun: "p", born: "p", upon: "p",
+  poon: "p", pound: "p",
 };
+
+/** A piece fused with the file letter after it ("pondi three" = pawn d3, "bishopi four" = bishop b4). The file only counts before a rank. */
+const PIECE_FILE_WORDS: Record<string, { p: PieceSymbol; f: string }> = {
+  pondi: { p: "p", f: "d" }, pondy: { p: "p", f: "d" },
+  bishopi: { p: "b", f: "b" }, bishopy: { p: "b", f: "b" }, bishopbee: { p: "b", f: "b" },
+};
+
+/** Whole moves heard as one word ("Pondicherry" = pawn d three). */
+const MOVE_WORDS: Record<string, { p: PieceSymbol; sq: string }> = {
+  pondicherry: { p: "p", sq: "d3" }, pondycherry: { p: "p", sq: "d3" },
+};
+
+/** Squares heard as one word, only right after a piece ("night free" = knight f3). */
+const PIECE_SQUARE_WORDS: Record<string, string> = { free: "f3" };
 
 /** File words only count as a file when a rank follows ("see four"), so "a", "be", "see", "if" stay ordinary words otherwise. */
 const FILE_WORDS: Record<string, string> = {
@@ -80,12 +98,31 @@ export function normalize(text: string): string {
     .replace(/[’']/g, "")
     .replace(/0-0-0|o-o-o/g, " castle queenside ")
     .replace(/0-0|o-o/g, " castle kingside ")
+    .replace(/\b(?:wish|which|wich|bish|bitch|fish) (?:up|op|ap)\b/g, "bishop")
     .replace(/king side/g, "kingside")
     .replace(/queen side/g, "queenside")
     .replace(/([a-h])\s*-\s*([a-h])/g, "$1 $2")
     .replace(/[^a-z0-9=+#\s]/g, " ")
     .replace(/\s+/g, " ")
     .trim();
+}
+
+/** Sound-alike prefixes for the piece names, for words nobody listed ("rukh", "rocketh", "nighty"). */
+const FUZZY_PIECES: [RegExp, PieceSymbol][] = [
+  [/^(?:ro+[ckq]|ru+[ckq]|rou?k|rop|roo)/, "r"],
+  [/^(?:bi?sh|wi?sh|rishab|bis[hs]?o)/, "b"],
+  [/^(?:kni|ni[gt]h?|nyt|nait)/, "n"],
+  [/^(?:pa+[wn]|po+[nrw]|pau|pah)/, "p"],
+  [/^(?:qui|kwi|kwe|quee)/, "q"],
+];
+export function fuzzyPiece(word: string): PieceSymbol | undefined {
+  return FUZZY_PIECES.find(([re]) => re.test(word))?.[1];
+}
+
+/** A word that could end a move: a square ("e7"), a file+rank pair ("see four") or a lone rank. */
+function looksLikeSquare(w: string): boolean {
+  const x = w.replace(/[+#]+$/, "");
+  return /^[a-h][1-8]$/.test(x) || x in RANK_WORDS || x in FILE_WORDS || x === "even";
 }
 
 export function tokenize(text: string): Token[] {
@@ -95,6 +132,12 @@ export function tokenize(text: string): Token[] {
     const w = words[i].replace(/[+#]+$/, "");
     const next = words[i + 1];
     if (!w) continue;
+    // "93" / "933": "knighty three", with the file lost
+    const ninety = /^9([1-8])\1?$/.exec(w);
+    if (ninety) {
+      out.push({ t: "piece", p: "n" }, { t: "rank", r: ninety[1] });
+      continue;
+    }
     // Fused tokens: "e4", "nf3", "exd5", "g1f3", "e8=q"
     const fused = /^([nbrqk])?([a-h])?(x)?([a-h][1-8])(?:=?([nbrq]))?$/.exec(w);
     if (fused && w.length >= 2) {
@@ -120,7 +163,26 @@ export function tokenize(text: string): Token[] {
       out.push({ t: "file", f: FILE_WORDS[w] }); // "e takes d5"
       continue;
     }
+    if (w in MOVE_WORDS) { out.push({ t: "piece", p: MOVE_WORDS[w].p }, { t: "square", sq: MOVE_WORDS[w].sq }); continue; }
+    if (w in PIECE_FILE_WORDS) {
+      const { p, f } = PIECE_FILE_WORDS[w];
+      out.push({ t: "piece", p });
+      const r = next?.replace(/[+#]+$/, "");
+      if (r !== undefined && r in RANK_WORDS) {
+        out.push({ t: "square", sq: f + RANK_WORDS[r] });
+        i++;
+      }
+      continue;
+    }
+    if (w in PIECE_SQUARE_WORDS && out[out.length - 1]?.t === "piece") { out.push({ t: "square", sq: PIECE_SQUARE_WORDS[w] }); continue; }
     if (w in PIECE_WORDS) { out.push({ t: "piece", p: PIECE_WORDS[w] }); continue; }
+    // "even" is how "e1" arrives in Indian English ("rooked even check").
+    if (w === "even" || w === "evan") { out.push({ t: "square", sq: "e1" }); continue; }
+    // An unknown word that sounds like a piece, in front of any square ("rocky", "rocket", "ruknam"): the piece slot.
+    if (!out.some((t) => t.t === "piece" || t.t === "square") && w.length >= 3 && words.slice(i + 1).some(looksLikeSquare)) {
+      const p = fuzzyPiece(w);
+      if (p) { out.push({ t: "piece", p }); continue; }
+    }
     if (CAPTURE_WORDS.has(w)) { out.push({ t: "capture" }); continue; }
     if (CASTLE_WORDS.has(w)) { out.push({ t: "castle" }); continue; }
     if (KING_SIDE.has(w)) { out.push({ t: "side", side: "k" }); continue; }
@@ -140,7 +202,11 @@ interface MoveSpec {
   from?: string;
   fromFile?: string;
   to?: string;
+  /** Only the rank was heard ("knighty three"). */
+  toRank?: string;
   capture?: boolean;
+  /** "takes the knight": the piece taken, when it is named after the capture word. */
+  captured?: PieceSymbol;
   promotion?: PieceSymbol;
   castle?: "k" | "q";
 }
@@ -154,15 +220,18 @@ export function toSpec(tokens: Token[]): MoveSpec | undefined {
     return { castle: side };
   }
   let promoteNext = false;
+  let rank: string | undefined;
   for (const tok of tokens) {
     switch (tok.t) {
       case "piece":
         if (promoteNext || squares.length > 0) {
           // A piece named after the destination is a promotion ("e8 queen") unless it's the moving piece's name.
           if (tok.p !== "p" && tok.p !== "k" && (promoteNext || spec.piece === undefined || spec.piece === "p")) spec.promotion = tok.p;
-        } else if (!spec.piece) spec.piece = tok.p;
+        } else if (spec.capture) spec.captured ??= tok.p;
+        else if (!spec.piece) spec.piece = tok.p;
         promoteNext = false;
         break;
+      case "rank": rank ??= tok.r; break;
       case "file": spec.fromFile = tok.f; break;
       case "square": squares.push(tok.sq); break;
       case "capture": spec.capture = true; break;
@@ -170,7 +239,11 @@ export function toSpec(tokens: Token[]): MoveSpec | undefined {
       default: break;
     }
   }
-  if (squares.length === 0) return undefined;
+  if (squares.length === 0) {
+    if (spec.captured) return spec; // "takes the knight"
+    if (spec.piece && rank) return { ...spec, toRank: rank }; // "knighty three"
+    return undefined;
+  }
   if (squares.length >= 2) {
     spec.from = squares[squares.length - 2];
     spec.to = squares[squares.length - 1];
@@ -181,18 +254,49 @@ export function toSpec(tokens: Token[]): MoveSpec | undefined {
 export function matchSpec(chess: Chess, spec: MoveSpec): Move[] {
   const legal = chess.moves({ verbose: true });
   if (spec.castle) return legal.filter((m) => m.flags.includes(spec.castle === "k" ? "k" : "q") && m.piece === "k");
-  let pool = legal.filter((m) => m.to === spec.to);
+  let pool = spec.to ? legal.filter((m) => m.to === spec.to) : spec.toRank ? legal.filter((m) => m.to[1] === spec.toRank) : legal;
+  if (spec.captured) pool = pool.filter((m) => m.captured === spec.captured);
   if (spec.from) pool = pool.filter((m) => m.from === spec.from);
   if (spec.fromFile) pool = pool.filter((m) => m.from[0] === spec.fromFile);
   if (spec.piece) pool = pool.filter((m) => m.piece === spec.piece);
   if (spec.promotion) pool = pool.filter((m) => m.promotion === spec.promotion);
   else if (pool.some((m) => m.promotion)) pool = pool.filter((m) => !m.promotion || m.promotion === "q");
-  if (!spec.piece && !spec.from && pool.length > 1) {
+  if (!spec.piece && !spec.from && spec.to && pool.length > 1) {
     // "e4" / "takes d5" with no piece named: pawns first, as people say it.
     const pawns = pool.filter((m) => m.piece === "p");
     if (pawns.length) pool = pawns;
   }
   return pool;
+}
+
+/** "pawn d2" when that pawn stands on d2: the user named where it is, not where it goes. */
+function movesFrom(chess: Chess, spec: MoveSpec): Move[] {
+  if (!spec.piece || !spec.to || spec.from || spec.captured) return [];
+  const here = chess.get(spec.to as Square);
+  if (!here || here.color !== chess.turn() || here.type !== spec.piece) return [];
+  return chess.moves({ square: spec.to as Square, verbose: true });
+}
+
+/**
+ * Every way to read one transcript, likeliest first. "bishop four" / "bishopi four" may also be
+ * "b4" with the letter heard as a bishop.
+ */
+export function readSpecs(text: string): MoveSpec[] {
+  const specs: MoveSpec[] = [];
+  const primary = toSpec(tokenize(text));
+  if (primary) specs.push(primary);
+  const asLetter = /\bbish(?:op)?(?:i|y|bee)?\s+(\S+)/.exec(normalize(text));
+  if (asLetter && UNAMBIGUOUS_RANKS.has(asLetter[1])) {
+    const pawn = toSpec(tokenize(`pawn b${RANK_WORDS[asLetter[1]]}`));
+    if (pawn) specs.push(pawn);
+  }
+  return specs;
+}
+
+/** Central destinations first, so a two-way question offers the likelier moves. */
+function byCentre(moves: Move[]): Move[] {
+  const off = (m: Move) => Math.abs(m.to.charCodeAt(0) - "d".charCodeAt(0) - 0.5);
+  return [...moves].sort((a, b) => off(a) - off(b) || a.san.localeCompare(b.san));
 }
 
 // ---------- stage B: phonetic ranking ----------
@@ -344,16 +448,39 @@ export function resolveSpokenMove(chess: Chess, move: string | undefined, heard:
   // Stage A over the alternatives (and the model's text when it's words, not SAN).
   const sources = alternatives.length ? alternatives : move ? [move] : [];
   const weights = new Map<string, number>();
+  // Readings worth asking about but never auto-played: "a6" when only a bishop can go there, "knighty
+  // three" with several knights able to reach the third rank, "pawn d2" naming where the pawn stands.
+  const unsure = new Set<string>();
   let saidIllegalMove = false;
   sources.forEach((text, i) => {
-    const spec = toSpec(tokenize(text));
-    if (!spec) return;
-    const matches = matchSpec(chess, spec);
-    if (matches.length === 1) weights.set(matches[0].san, (weights.get(matches[0].san) ?? 0) + (1 - i * 0.2));
-    else if (matches.length === 0 && i === 0) saidIllegalMove = true;
+    const specs = readSpecs(text);
+    if (specs.length === 0) return;
+    const perSpec = specs.map((spec) => byCentre(matchSpec(chess, spec)));
+    // Take the readings in turn so a two-way question offers one move from each.
+    const matches: Move[] = [];
+    for (let k = 0; perSpec.some((ms) => k < ms.length); k++) {
+      for (const ms of perSpec) if (ms[k] && !matches.some((m) => m.san === ms[k].san)) matches.push(ms[k]);
+    }
+    if (matches.length === 1) {
+      const spec = specs[perSpec.findIndex((ms) => ms.length > 0)];
+      const bareSquare = !spec.castle && !spec.piece && !spec.from && !spec.captured && matches[0].piece !== "p";
+      if (bareSquare || spec !== specs[0]) unsure.add(matches[0].san);
+      else weights.set(matches[0].san, (weights.get(matches[0].san) ?? 0) + (1 - i * 0.2));
+    } else if (matches.length > 1) matches.forEach((m) => unsure.add(m.san));
+    else {
+      const from = movesFrom(chess, specs[0]);
+      if (from.length) byCentre(from).forEach((m) => unsure.add(m.san));
+      else if (i === 0) saidIllegalMove = true;
+    }
   });
 
   if (alternatives.length === 0 && modelMove) return { kind: "move", san: modelMove.san, via: "exact" };
+
+  if (weights.size === 0 && unsure.size > 0) {
+    const candidates = modelMove && unsure.has(modelMove.san) ? [modelMove.san, ...[...unsure].filter((s) => s !== modelMove.san)] : [...unsure];
+    const reason = saidIllegalMove ? "illegal" : candidates.length > 1 ? "ambiguous" : "unclear";
+    return { kind: "confirm", candidates: candidates.slice(0, 2), heard: heardLabel, reason };
+  }
 
   if (weights.size > 0) {
     const ranked = [...weights.entries()].sort((a, b) => b[1] - a[1]);
@@ -389,10 +516,13 @@ export function resolveSpokenMove(chess: Chess, move: string | undefined, heard:
 
 /** "Did you mean knight to e4, or knight to f4?" */
 export function confirmQuestion(chess: Chess, r: Extract<Resolution, { kind: "confirm" }>): string {
-  const spoken = r.candidates.map((san) => {
-    const m = new Chess(chess.fen()).move(san);
-    return spokenMove(m);
-  });
+  const moves = r.candidates.map((san) => new Chess(chess.fen()).move(san));
+  // Same piece, same destination: only the starting square differs, so ask exactly that.
+  if (moves.length === 2 && moves[0].piece === moves[1].piece && moves[0].to === moves[1].to && moves[0].from !== moves[1].from) {
+    const name = PIECE_SPOKEN[moves[0].piece];
+    return `Which ${name}: the one on ${moves[0].from}, or the one on ${moves[1].from}?`;
+  }
+  const spoken = moves.map((m) => spokenMove(m));
   const lead = r.reason === "illegal" ? "That move isn't possible here." : r.heard ? `I heard "${r.heard}".` : "I'm not sure I caught that.";
   return spoken.length > 1 ? `${lead} Did you mean ${spoken[0]}, or ${spoken[1]}?` : `${lead} Did you mean ${spoken[0]}?`;
 }

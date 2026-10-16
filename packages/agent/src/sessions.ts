@@ -16,6 +16,8 @@ export interface Session {
   humanColor?: string;
   level?: number;
   gameOver?: boolean;
+  /** A move question Alexa asked and the user hasn't answered: candidates as SAN, best first. */
+  pending?: { candidates: string[]; asks: number };
   /** How much Alexa comments: "minimal" | "brief" (default) | "chatty". */
   chattiness?: Chattiness;
   /** Polly voice id, e.g. "Kajal". */

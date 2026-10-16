@@ -364,3 +364,57 @@ Two facts checked in ap-south-1:
 - **Local full stack, no AWS deploy needed:** `.claude/launch.json` (mcp-local :3001, agent-local :3002 with real Bedrock + Polly, web-local :5173).
 - **Template:** Polly permission added; model default changed. `sam validate --lint` and `sam build` pass.
 - **Not yet verified:** real microphone and wake word in Chrome; deployed Lambdas.
+
+## Phase 5 — Chatty companion and "chess ears" (2026-10-16)
+
+### Deployed fixes (live on CloudFront, 2026-10-16)
+- Conversation mode: no "Alexa" needed after replies (2 min during a game, 30 s after a question, 20 s otherwise).
+- Web files are served with no-cache.
+- Debug drawer (press D): build tag, mic on/off, what was heard, ignored or dropped speech.
+- The agent asks for a missing colour or difficulty itself.
+- The server never auto-plays a piece move for a bare square ("a6" no longer becomes Ba6).
+
+### Built in Phase 5 (committed and deployed 2026-10-16)
+- **Agent (`packages/agent/src/agent.ts`)**
+  - `factsForModel` gives the model spoken moves plus ranked `talkingPoints` instead of the server's canned `speech`; "better was" only for mistakes and blunders.
+  - `recentPhrases` goes into the prompt as an avoid-list; `cleanSpeech` strips hand-over closers ("Your move.", "What will you play next?", "Your turn — what's next?").
+  - `limitSentences` caps chatty replies at 4 sentences; `chattinessCommand` handles "talk more/less", "just the moves" without a model call.
+  - Local tool `ask_again` for garbled speech and small talk (it cannot announce moves). A tool call is forced after a game ends too.
+  - `new_game` facts say who moves first. The chess-grammar hearing (`chessHeard`) leads the alternatives passed to `make_move`. Phrasing temperature is 0.8.
+  - Variety: `QUIET_THEMES` rotate by turn count (third argument of `talkingPoints`), and `dropRepeatedSentences` removes any sentence after the first that overlaps a recent one by 0.7 or more (never one announcing this turn's moves).
+  - `needsConfirmation` from `make_move` is spoken word for word and ends the loop, so the model cannot predict a move.
+- **Skill**: `blind-chess/SKILL.md` rewritten as the "chatty companion" (default chattiness = chatty).
+- **MCP server**: `make_move` commentary adds swing, trend, position, material (each only when changed), `yourMoveIdeas`, `yourMoveSpoken`/`engineMoveSpoken`, `gameOverText`, and only new alerts. `new_game` returns `engineMoveSpoken` and `levelName`. `spokenMove.ts` handles en-IN mishearings (porn/pond/Pondicherry → pawn, "take night").
+- **Web**: `web/vosk.js` runs Vosk (`vosk-model-small-en-in-0.4`, in gitignored `web/models/`, fetched by `scripts/get-vosk-model.ps1`) with a chess grammar next to Chrome speech recognition; `app.js` pairs results by time and sends `chessHeard`. `deploy.ps1` uploads `models/` with a long cache header.
+- **Eval**: `npm run eval -- --label <name>` in `packages/agent` (needs the local MCP server; set `MCP_URL` if it is not on :3001). Results in `packages/agent/eval-results/`.
+
+### Eval results (24-turn script)
+| run | repeated 3-grams | hand-back endings | words/reply | made-up moves |
+|---|---|---|---|---|
+| baseline (HEAD) | 94 | 58% | 27 | — |
+| phase5 (before variety fixes) | 61 | 4% | 28 | 0 |
+| phase5d | 32 | 0% | 25 | 0 (1 post-game flag from the checker; the reply restates the game history) |
+
+Cost ≈ $0.06–0.07 per game.
+
+### Later: coach mode
+A coach persona and voice, "what's the better move here?", "why was that bad?" from stored evals, and a post-game review.
+
+### Phase 5b — recognition fixes after the first real-mic game (2026-10-16)
+Findings from a 96-turn live game: Chrome (en-IN) almost never heard "rook" (rock, rocky, rok, ruk, rope, book, rocket, even…); "yes" after "Did you mean…?" was treated as a new move, so the same question repeated up to 9 times; the local dev server dropped `chessHeard`, so the Vosk readings were never used in that game.
+- `dev-server.ts` now forwards `chessHeard` and appends every turn to `packages/agent/eval-results/live/<date>.jsonl`; the debug drawer keeps its last 500 lines in localStorage and has a "Copy log" button; it also logs Chrome's audio/sound/speech events, Vosk partials/results and a mic level every 3 s.
+- Agent: a pending question is stored in the session (`pending`). "yes", "no", "first/second", or the disambiguating file ("see") are answered locally; the second identical question plays the likeliest move and says "I took that as …; say undo if that's wrong". Move-shaped speech forces `make_move` (never `ask_again`). A request with no text no longer crashes.
+- Resolver (`spokenMove.ts`): many more rook/bishop/pawn sound-alikes, fuzzy piece prefixes, "even" = e1, "wish up" = bishop, and "Which rook: the one on c7, or the one on e1?" when two pieces reach the same square.
+- Web: Chrome `SpeechRecognition.phrases` biasing was tried and removed: Chrome's cloud recognizer fails every start with `phrases-not-supported`.
+- Not done yet: per-turn dynamic Vosk grammar, cloud STT (Amazon Transcribe custom vocabulary or Deepgram keyterms). Decide after a real-mic retest with the new logs.
+
+### Afternoon incident: the wake word went deaf (2026-10-16)
+- Symptom: Chrome reported "speech detected" but returned no words, so even "Alexa" stopped working.
+- Cause: Chrome's **English (India)** recognizer silently stopped returning words for this browser. A bare A/B test with none of our code on the page: en-IN 0 results, en-US fine on the same mic, no errors from either. Possibly a Google-side problem, or throttling after hundreds of recognition restarts during debugging.
+- Fixes (build `en-us-10`, deployed):
+  - Default language is now en-US (the drawer's picker still switches it).
+  - The page switches to en-US by itself after two recognition sessions that hear speech but return no words.
+  - Chess ears (Vosk) are **off by default** (`?ears=1` turns them on). Their benefit wasn't proven, and a second mic capture is a risk.
+  - Forced early finals were removed: they cut "Alexa … let's play chess" in two.
+- Agent: `ask_again` must not brush off game questions; board questions go to the board tools. A "Your move, please" closer is stripped. The skill notes Hindi filler ("aur", "haan").
+- Open: an answer to "are you going to take my pawn?" claimed d4 could take d5. It was board reasoning beyond the tool facts, worth a look in coach mode.

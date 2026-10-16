@@ -30,7 +30,7 @@ const respond = (statusCode: number, body: unknown): LambdaFunctionURLResult => 
 export const handler = async (event: LambdaFunctionURLEvent): Promise<LambdaFunctionURLResult> => {
   if (event.requestContext.http.method !== "POST") return respond(405, { error: "POST { sessionId, text, alternatives? }" });
 
-  let body: { sessionId?: unknown; text?: unknown; alternatives?: unknown; warm?: unknown };
+  let body: { sessionId?: unknown; text?: unknown; alternatives?: unknown; chessHeard?: unknown; warm?: unknown };
   try {
     const raw = event.isBase64Encoded ? Buffer.from(event.body ?? "", "base64").toString() : (event.body ?? "");
     body = JSON.parse(raw);
@@ -52,9 +52,12 @@ export const handler = async (event: LambdaFunctionURLEvent): Promise<LambdaFunc
     ? body.alternatives.filter((a): a is string => typeof a === "string" && a.length <= 500).slice(0, 5)
     : [];
 
+  // The page's chess-grammar recognizer ("pawn d four"), when it heard chess words in this utterance.
+  const chessHeard = typeof body.chessHeard === "string" && body.chessHeard.length <= 200 ? body.chessHeard.trim() : undefined;
+
   const started = Date.now();
   try {
-    const result = await runTurn(deps, sessionId, { text: text.trim(), alternatives });
+    const result = await runTurn(deps, sessionId, { text: text.trim(), alternatives, chessHeard });
     console.log(
       JSON.stringify({
         level: "info",
@@ -62,6 +65,7 @@ export const handler = async (event: LambdaFunctionURLEvent): Promise<LambdaFunc
         sessionId,
         text,
         alternatives,
+        chessHeard,
         reply: result.reply,
         tools: result.toolCalls.map((t) => t.name),
         model: deps.modelId,

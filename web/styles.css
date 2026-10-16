@@ -119,3 +119,4 @@ button, input, select { font: inherit; color: inherit; }
 .debug .alts { color: var(--muted); }
 .debug .tools { color: #c8a2ff; font-family: ui-monospace, Consolas, monospace; }
 .debug .meta { color: var(--muted); }
+.debug li.note { color: var(--muted); font-style: italic; }

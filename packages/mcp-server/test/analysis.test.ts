@@ -1,6 +1,16 @@
 import { Chess } from "chess.js";
 import { describe, expect, it } from "vitest";
-import { alertsFor, classifyMove, describeEval, hangingPieces, moveIdeas } from "../src/chess/analysis.js";
+import {
+  alertsFor,
+  classifyMove,
+  describeEval,
+  evalSwing,
+  evalTrend,
+  hangingPieces,
+  materialBalance,
+  moveIdeas,
+  spokenMaterial,
+} from "../src/chess/analysis.js";
 import { currentOpening, openingAt } from "../src/chess/openings.js";
 
 describe("move quality", () => {
@@ -35,6 +45,33 @@ describe("threats and ideas", () => {
     expect(moveIdeas(m, c)).toEqual(expect.arrayContaining(["captures a pawn", "gives check"]));
     const d = new Chess();
     expect(moveIdeas(d.move("Nf3"), d)).toContain("develops the knight");
+  });
+});
+
+describe("game flow facts", () => {
+  it("only reports real swings", () => {
+    expect(evalSwing(undefined, 300)).toBeUndefined();
+    expect(evalSwing(20, 90)).toBeUndefined();
+    expect(evalSwing(20, 250)).toEqual({ cp: 230, direction: "your way" });
+    expect(evalSwing(50, -200)).toEqual({ cp: -250, direction: "my way" });
+  });
+
+  it("reads a trend from the last few evaluations", () => {
+    expect(evalTrend([0, 10])).toBeUndefined();
+    expect(evalTrend([0, 40, 90, 160])).toBe("improving");
+    expect(evalTrend([50, 0, -80, -120])).toBe("slipping");
+    expect(evalTrend([500, 0, 20, 10, 30])).toBe("steady"); // only the last four count
+  });
+
+  it("counts material from the user's side", () => {
+    const c = new Chess();
+    expect(materialBalance(c, "w")).toBe(0);
+    c.move("e4"); c.move("d5"); c.move("exd5");
+    expect(materialBalance(c, "w")).toBe(1);
+    expect(materialBalance(c, "b")).toBe(-1);
+    expect(spokenMaterial(1)).toBe("you're up a pawn");
+    expect(spokenMaterial(-3)).toBe("I'm up 3 points");
+    expect(spokenMaterial(0)).toBe("material is level");
   });
 });
 

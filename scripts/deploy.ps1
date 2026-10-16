@@ -60,8 +60,22 @@ if (-not ($existing -and $existing.WebsiteUrl)) {
 # WriteAllText writes UTF-8 without the BOM that PowerShell 5.1's Out-File adds.
 [IO.File]::WriteAllText((Join-Path $root "web/config.json"), (@{ agentUrl = $out.AgentUrl } | ConvertTo-Json))
 
-aws s3 sync web/ "s3://$($out.WebsiteBucketName)" --delete --region $Region --profile $Profile
+# models/ (the chess-ears Vosk model, ~36 MB) is excluded here and uploaded separately below; excluded
+# paths are also safe from --delete.
+aws s3 sync web/ "s3://$($out.WebsiteBucketName)" --delete --exclude "models/*" --region $Region --profile $Profile
 if ($LASTEXITCODE -ne 0) { throw "s3 sync failed" }
+# Re-upload every file with no-cache (sync skips unchanged ones): browsers then revalidate with a cheap
+# ETag check instead of guessing a lifetime, so a deploy is picked up on the next page load.
+aws s3 cp web/ "s3://$($out.WebsiteBucketName)" --recursive --exclude "models/*" --cache-control "no-cache" --region $Region --profile $Profile
+if ($LASTEXITCODE -ne 0) { throw "s3 cp failed" }
+# Model files are versioned by name and never change: cache them for a year. Explicit content type, so
+# nothing adds a Content-Encoding that would make the browser unzip the .tar.gz before vosk-browser does.
+if (Test-Path "web/models") {
+  aws s3 sync web/models/ "s3://$($out.WebsiteBucketName)/models/" --delete --cache-control "max-age=31536000, immutable" --content-type "application/gzip" --region $Region --profile $Profile
+  if ($LASTEXITCODE -ne 0) { throw "s3 sync of models failed" }
+} else {
+  Write-Host "No web/models/ - chess ears stay off on the site (run scripts/get-vosk-model.ps1 to add the model)"
+}
 aws cloudfront create-invalidation --distribution-id $out.DistributionId --paths "/*" --profile $Profile | Out-Null
 
 Write-Host ""

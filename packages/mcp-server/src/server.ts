@@ -18,7 +18,18 @@ import {
   uciToObject,
 } from "./chess/game.js";
 import { LEVELS, type SearchResult } from "./chess/engine.js";
-import { alertsFor, classifyMove, describeEval, forWhite, moveIdeas, type MoveQuality } from "./chess/analysis.js";
+import {
+  alertsFor,
+  classifyMove,
+  describeEval,
+  evalSwing,
+  evalTrend,
+  forWhite,
+  materialBalance,
+  moveIdeas,
+  spokenMaterial,
+  type MoveQuality,
+} from "./chess/analysis.js";
 import { currentOpening } from "./chess/openings.js";
 import { confirmQuestion, resolveSpokenMove } from "./chess/spokenMove.js";
 import { colorName, spokenMove, spokenPieceList } from "./chess/spoken.js";
@@ -191,7 +202,16 @@ export function createChessServer(deps: Deps): McpServer {
         } else {
           speech += " Your move.";
         }
-        return ok({ speech, gameId: game.gameId, humanColor: colorName(humanColor), level, engineMove: engineMoveRec?.san, fen: chess.fen() });
+        return ok({
+          speech,
+          gameId: game.gameId,
+          humanColor: colorName(humanColor),
+          level,
+          levelName: LEVELS[level].label,
+          engineMove: engineMoveRec?.san,
+          engineMoveSpoken: engineMoveRec?.spoken,
+          fen: chess.fen(),
+        });
       }),
   );
 
@@ -209,7 +229,7 @@ export function createChessServer(deps: Deps): McpServer {
     },
     ({ gameId, move, alternatives }) =>
       guard(async () => {
-        let { game, chess } = await load(gameId);
+        let { game, moves, chess } = await load(gameId);
         if (game.status !== "active") throw new UserFacingError(`That game is already over (${game.status}). Start a new game to play again.`);
 
         // Catch up if a previous engine reply was lost.
@@ -225,10 +245,18 @@ export function createChessServer(deps: Deps): McpServer {
           throw new IllegalMoveError(`"${said}" isn't a legal move here.`, suggestMoves(chess, move));
         }
 
+        // Earlier evaluations (user's side, after each of their moves) give swings, trends and "position changed".
+        const pastEvals = moves
+          .filter((m) => m.by === "human" && typeof m.evalCp === "number")
+          .map((m) => m.evalCp!);
+        const materialBefore = materialBalance(chess, game.humanColor);
+        const alertsBefore = new Set(alertsFor(chess, game.humanColor)); // already warned about last turn
+
         // Evaluate before and after the user's move to judge it.
         const openingBefore = currentOpening(chess)?.name;
         const before = await tryAnalyse(chess);
         const human = chess.move(resolution.san);
+        const humanIdeas = moveIdeas(human, chess);
         const after = await tryAnalyse(chess);
 
         let quality: MoveQuality | undefined;
@@ -266,20 +294,34 @@ export function createChessServer(deps: Deps): McpServer {
         else if (chess.inCheck()) speech += " You're in check.";
 
         const newOpening = reply?.rec.opening ?? humanRec.opening;
+        const lastEval = pastEvals[pastEvals.length - 1];
+        const positionNow = evalCp !== undefined ? describeEval(forWhite(evalCp, game.humanColor)) : undefined;
+        const positionBefore = lastEval !== undefined ? describeEval(forWhite(lastEval, game.humanColor)) : "roughly equal";
+        const materialAfter = materialBalance(chess, game.humanColor);
+        const trendNow = evalCp !== undefined ? evalTrend([...pastEvals, evalCp]) : undefined;
         const commentary = {
           opening: newOpening ? { name: newOpening, reachedBy: reply?.rec.opening ? "my move" : "your move" } : undefined,
           yourMove: quality
             ? { quality, lossCp, betterWas: bestSan ? spokenMove(new Chess(human.before).move(bestSan)) : undefined }
             : undefined,
+          yourMoveIdeas: humanIdeas,
           myMoveIdeas: reply ? moveIdeas(reply.move, chess) : [],
-          position: evalCp !== undefined ? describeEval(forWhite(evalCp, game.humanColor)) : undefined,
-          alerts: alertsFor(chess, game.humanColor),
+          // Only when the assessment changed category, so it isn't repeated every turn.
+          position: positionNow && positionNow !== positionBefore ? positionNow : undefined,
+          swing: evalCp !== undefined ? evalSwing(lastEval, evalCp) : undefined,
+          // Trend and warnings only when they're news, so the same line isn't repeated every turn.
+          trend: trendNow !== evalTrend(pastEvals) ? trendNow : undefined,
+          material: materialAfter !== materialBefore ? spokenMaterial(materialAfter) : undefined,
+          alerts: alertsFor(chess, game.humanColor).filter((a) => !alertsBefore.has(a) || /^your (queen|rook)/.test(a)),
         };
 
         return ok({
           speech,
           yourMove: humanRec.san,
           engineMove: reply?.rec.san,
+          yourMoveSpoken: humanRec.spoken,
+          engineMoveSpoken: reply?.rec.spoken,
+          gameOverText: over || undefined,
           heardAs: resolution.via === "exact" ? undefined : resolution.heard,
           commentary,
           status: game.status,

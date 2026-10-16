@@ -78,5 +78,46 @@ export function alertsFor(chess: Chess, userColor: Color): string[] {
     .map((h) => `your ${PIECE_NAMES[h.piece]} on ${spokenSquare(h.square)} is under attack by a ${PIECE_NAMES[h.attackedBy]}`);
 }
 
+/** Material for `color` minus the opponent's, in pawns (kings excluded). */
+export function materialBalance(chess: Chess, color: Color): number {
+  let total = 0;
+  for (const row of chess.board()) {
+    for (const p of row) {
+      if (!p || p.type === "k") continue;
+      total += p.color === color ? VALUE[p.type] : -VALUE[p.type];
+    }
+  }
+  return total;
+}
+
+/** "you're up 3 points", "material is level", "I'm up a pawn" (balance from the user's side). */
+export function spokenMaterial(balance: number): string {
+  if (balance === 0) return "material is level";
+  const n = Math.abs(balance);
+  const amount = n === 1 ? "a pawn" : `${n} points`;
+  return balance > 0 ? `you're up ${amount}` : `I'm up ${amount}`;
+}
+
+/**
+ * How the game moved over the last full move, from the user's side: a label only for real swings,
+ * so quiet turns don't get "Black is winning" every time.
+ */
+export function evalSwing(previousCp: number | undefined, nowCp: number): { cp: number; direction: "your way" | "my way" } | undefined {
+  if (previousCp === undefined) return undefined;
+  const cp = Math.round(nowCp - previousCp);
+  if (Math.abs(cp) < 150) return undefined;
+  return { cp, direction: cp > 0 ? "your way" : "my way" };
+}
+
+/** Direction of the user's evaluations over their last few moves (oldest first). */
+export function evalTrend(history: number[]): "improving" | "steady" | "slipping" | undefined {
+  const recent = history.slice(-4);
+  if (recent.length < 3) return undefined;
+  const change = recent[recent.length - 1] - recent[0];
+  if (change >= 100) return "improving";
+  if (change <= -100) return "slipping";
+  return "steady";
+}
+
 /** Converts a side-to-move score to White's point of view. */
 export const forWhite = (cp: number, sideToMove: Color) => (sideToMove === "w" ? cp : -cp);

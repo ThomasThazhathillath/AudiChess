@@ -4,3 +4,4 @@ dist/
 *.log
 web/config.json
 samconfig.local.toml
+web/models/

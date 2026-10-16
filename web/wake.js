@@ -13,10 +13,22 @@
     return text.slice(last + m[m.length - 1].length).replace(/^[\s,.!?:;-]+/, "").trim();
   }
 
+  // Conversation mode: after Alexa replies, keep listening without the wake word.
+  const FOLLOW_UP = { inGame: 120000, question: 30000, other: 20000 };
+
+  /** How long to listen without the wake word after a reply. During a game you think between moves, so it stays open. */
+  function followUpMs(reply) {
+    if (reply.error) return FOLLOW_UP.other;
+    if (reply.gameId && !reply.gameOver) return FOLLOW_UP.inGame;
+    return reply.expectsReply ? FOLLOW_UP.question : FOLLOW_UP.other;
+  }
+
   /**
    * Decide what to do with one final recognition result.
    * @param {string[]} alts   recognition alternatives, best first
-   * @param {{now:number, awakeUntil:number, followUpUntil:number}} windows
+   * @param {{now:number, awakeUntil:number, followUpUntil:number, speechAt?:number}} windows
+   *   speechAt: when the first interim result of this utterance arrived. Chrome finalises a second or
+   *   so after you stop talking, so an answer that started inside the window still counts.
    * @returns {{action:"send", text:string, alternatives:string[]} | {action:"awake"} | {action:"ignore"}}
    */
   function decide(alts, windows) {
@@ -29,11 +41,13 @@
       const others = clean.map((a) => (WAKE.test(a) ? afterWake(a) : a)).filter((c) => c && c !== cmd);
       return { action: "send", text: cmd, alternatives: [cmd, ...others] };
     }
-    if (windows.awakeUntil > windows.now || windows.followUpUntil > windows.now) {
+    const until = Math.max(windows.awakeUntil, windows.followUpUntil);
+    const heardAt = Math.min(windows.now, windows.speechAt || windows.now);
+    if (until > heardAt) {
       return { action: "send", text: clean[0], alternatives: clean };
     }
     return { action: "ignore" };
   }
 
-  root.AlexaWake = { WAKE, afterWake, decide };
+  root.AlexaWake = { WAKE, FOLLOW_UP, afterWake, decide, followUpMs };
 })(typeof window !== "undefined" ? window : globalThis);

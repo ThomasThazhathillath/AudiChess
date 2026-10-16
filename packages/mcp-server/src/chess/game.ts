@@ -46,9 +46,17 @@ export function playHumanMove(chess: Chess, input: string): Move {
   // "nf3" -> "Nf3" (never touch a leading "b": it may be the b-file)
   if (/^[nrqk][a-h]?[1-8]?x?[a-h][1-8]/.test(raw)) candidates.add(raw[0].toUpperCase() + raw.slice(1));
 
+  // chess.js is forgiving: "a6" becomes Ba6 when no pawn can go there. A bare square means a pawn,
+  // so a move by a different piece than the one named is not what the user said.
+  const named = namedPiece(raw);
   for (const san of candidates) {
     try {
-      return chess.move(san);
+      const m = chess.move(san);
+      if (named && m.piece !== named) {
+        chess.undo();
+        continue;
+      }
+      return m;
     } catch {
       /* try the next form */
     }
@@ -65,6 +73,14 @@ export function playHumanMove(chess: Chess, input: string): Move {
   }
 
   throw new IllegalMoveError(`${raw} is not a legal move here.`, suggestMoves(chess, raw));
+}
+
+/** The piece a SAN-ish input names: "Nf3" → n, "e4"/"D4"/"exd5" → p, castling or anything else → undefined. */
+function namedPiece(raw: string): string | undefined {
+  if (/^[a-hA-H][1-8]/.test(raw) || /^[a-h]x[a-h][1-8]/.test(raw)) return "p"; // "B4" from speech is the b4 square
+  if (/^[NBRQK]/.test(raw)) return raw[0].toLowerCase();
+  if (/^[nrqk][a-h]?[1-8]?x?[a-h][1-8]/.test(raw)) return raw[0];
+  return undefined;
 }
 
 /** Legal alternatives that share the target square or piece type with what was asked for. */
