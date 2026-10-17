@@ -9,12 +9,11 @@ import { fileURLToPath } from "node:url";
 const root = join(fileURLToPath(new URL(".", import.meta.url)), "..", "web");
 const port = Number(process.env.PORT ?? 5173);
 const agentUrl = process.env.AGENT_URL ?? "http://127.0.0.1:3002/";
-const transcribeUrl = process.env.TRANSCRIBE_URL ?? new URL("transcribe-url", agentUrl).href; // the local agent also serves the presigner
 const types = { ".html": "text/html", ".js": "text/javascript", ".css": "text/css", ".json": "application/json" };
 
 createServer(async (req, res) => {
   const path = new URL(req.url, "http://x").pathname;
-  if (path === "/config.json") return res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ agentUrl, transcribeUrl }));
+  if (path === "/config.json") return res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ agentUrl }));
   const file = normalize(join(root, path === "/" ? "index.html" : path));
   if (!file.startsWith(root)) return res.writeHead(403).end();
   try {

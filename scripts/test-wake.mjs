@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 
 new Function(readFileSync(new URL("../web/wake.js", import.meta.url), "utf8"))();
-const { decide, afterWake, followUpMs, FOLLOW_UP, bargeIn, isOnlyStop, endpointMs } = globalThis.AlexaWake;
+const { decide, afterWake, followUpMs, FOLLOW_UP, isOnlyStop } = globalThis.AlexaWake;
 
 // woken: "Alexa" was said (in the utterance or just before it); false in the conversation-mode window.
 const closed = { now: 1000, awakeUntil: 0, followUpUntil: 0 };
@@ -24,39 +24,11 @@ const cases = [
   [["easy"], { now: 9000, awakeUntil: 0, followUpUntil: 8000, speechAt: 8500 }, { action: "ignore" }],
 ];
 
-// Barge-in while Alexa talks: her name or a stop word interrupts; her own voice leaking into the mic does not.
-const saying = "Knight to f3. I play pawn to d5, and your bishop on c4 is under attack.";
-assert.equal(bargeIn("stop", saying), "stop");
-assert.equal(bargeIn("okay stop", saying), "stop");
-assert.equal(bargeIn("Alexa", saying), "command");
-assert.equal(bargeIn("Alexa what is", saying), "command");
-assert.equal(bargeIn("I play pawn to d5", saying), null); // echo of her own words
-assert.equal(bargeIn("your bishop on c4", saying), null);
-assert.equal(bargeIn("wait", "Wait for it: knight takes d5."), null); // she said "wait" herself
-assert.equal(bargeIn("", saying), null);
-// Answering her question while she still asks it (live test: "black, easy" was lost under a long question).
-const asking = "Sure! White or black? And easy, medium or hard?";
-assert.equal(bargeIn("black, easy", asking, true), "answer");
-assert.equal(bargeIn("Yes", "Did you mean knight to f3?", true), "answer");
-assert.equal(bargeIn("white or black", asking, true), null); // her own words, in her order: echo
-assert.equal(bargeIn("black", asking, true), null); // one of her words alone, timing unknown: treat as echo
-assert.equal(bargeIn("black", asking, true, 0.5), null); // heard just as she says it: echo
-assert.equal(bargeIn("black?", asking, true, 0.9), "answer"); // live test: said after she asked "white or black?"
-assert.equal(bargeIn("black, easy", "Knight to f3. I play d5.", false), null); // not a question: no barge-in
+// A lone stop word ("stop", "okay stop") has nothing to send to the agent.
 assert.equal(isOnlyStop("Stop."), true);
 assert.equal(isOnlyStop("okay stop"), true);
 assert.equal(isOnlyStop("stop, what is my best move"), false);
 assert.equal(isOnlyStop("knight f3"), false);
-// Our end-of-speech timer: complete-looking commands end fast, a lone word waits for more.
-assert.equal(endpointMs("Knight F3."), 700);
-assert.equal(endpointMs("castle kingside"), 700);
-assert.equal(endpointMs("what is my best move?"), 700);
-assert.equal(endpointMs("yes"), 800);
-assert.equal(endpointMs("Alexa"), 1600);
-assert.equal(endpointMs("let's play"), 1100);
-assert.equal(endpointMs("knight"), 2500); // the square is still coming
-assert.equal(endpointMs("Alexa, castle"), 2500);
-assert.equal(endpointMs("bishop takes"), 2500);
 
 let n = 0;
 for (const [alts, windows, expected] of cases) {
@@ -98,7 +70,7 @@ assert.equal(isSleepCommand(["knight f3"]), false);
 const { soundsLikeChess } = globalThis.AlexaWake;
 assert.equal(soundsLikeChess(["pawn", "paws"]), true);
 assert.equal(soundsLikeChess(["paws", "pours"]), false);
-console.log(`wake.js: ${n + 35 + 5 + 14 + 7 + 8} checks passed`);
+console.log(`wake.js: ${n + 11 + 5 + 14 + 7 + 8} checks passed`);
 
 // ---------- vosk.js: timeline, hearings, pairing with Chrome ----------
 new Function(readFileSync(new URL("../web/vosk.js", import.meta.url), "utf8"))();

@@ -4,8 +4,6 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { BedrockRuntimeClient, ConverseCommand } from "@aws-sdk/client-bedrock-runtime";
 import { PollyClient } from "@aws-sdk/client-polly";
-import { defaultProvider } from "@aws-sdk/credential-provider-node";
-import { handler as transcribeUrlHandler } from "../../transcribe-url/src/handler.js";
 import { runTurn } from "../src/agent.js";
 import { McpChessTools } from "../src/mcpClient.js";
 import { MemorySessionStore } from "../src/sessions.js";
@@ -24,7 +22,7 @@ const deps = {
   converse: (input: any) => bedrock.send(new ConverseCommand(input)),
   tools: new McpChessTools(process.env.MCP_URL ?? "http://127.0.0.1:3001/mcp", async () => process.env.MCP_TOKEN ?? "local"),
   sessions: new MemorySessionStore(),
-  modelId: process.env.MODEL_ID ?? "apac.amazon.nova-pro-v1:0",
+  modelId: process.env.MODEL_ID ?? "global.amazon.nova-2-lite-v1:0", // what production runs, and cheaper than Nova Pro
   speak: pollySpeaker(new PollyClient({ region })),
 };
 
@@ -37,16 +35,6 @@ createServer(async (req, res) => {
   const body = Buffer.concat(chunks);
   const raw = body.toString("utf8");
   const path = new URL(req.url ?? "/", "http://x").pathname;
-  // The exact microphone audio the page streamed to Transcribe (16 kHz s16le), local testing only, so a bad
-  // transcript can be replayed: node scripts/test-transcribe.mjs --wav <file>.
-  if (path === "/debug-audio") {
-    try {
-      const session = (new URL(req.url ?? "/", "http://x").searchParams.get("session") ?? "unknown").replace(/[^a-z0-9-]/gi, "").slice(0, 40);
-      mkdirSync(LIVE_DIR, { recursive: true });
-      appendFileSync(join(LIVE_DIR, `${new Date().toISOString().slice(0, 10)}-${session}.pcm`), body);
-    } catch { /* never break the page */ }
-    return res.writeHead(204).end();
-  }
   // The page's debug drawer, mirrored while testing locally (web/app.js mirrorLog).
   if (path === "/debug-log") {
     try {
@@ -57,19 +45,6 @@ createServer(async (req, res) => {
       }
     } catch { /* logging must never break anything */ }
     return res.writeHead(204).end();
-  }
-  // Local twin of the alexa_chess_transcribe_url Lambda: same handler, signed with your local AWS credentials.
-  if (new URL(req.url ?? "/", "http://x").pathname === "/transcribe-url") {
-    try {
-      const out = await transcribeUrlHandler(
-        { headers: {}, body: raw, isBase64Encoded: false, requestContext: { http: { method: req.method, sourceIp: "127.0.0.1" } } } as any,
-        { credentials: defaultProvider() as any },
-      );
-      return res.writeHead(out.statusCode ?? 200, { "content-type": "application/json" }).end(out.body);
-    } catch (err) {
-      console.error(err);
-      return res.writeHead(500, { "content-type": "application/json" }).end(JSON.stringify({ error: String(err) }));
-    }
   }
   try {
     const body = JSON.parse(raw || "{}");

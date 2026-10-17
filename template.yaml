@@ -219,68 +219,6 @@ Resources:
       Principal: "*"
       InvokedViaFunctionUrl: true
 
-  # ---------- Speech ears: presigned URL for Amazon Transcribe streaming ----------
-  # The browser streams microphone audio straight to Transcribe over a WebSocket; this function only hands out a
-  # short-lived (300 s) SigV4-presigned URL, so no AWS credentials ever reach the page.
-  TranscribeUrlLogGroup:
-    Type: AWS::Logs::LogGroup
-    Properties:
-      LogGroupName: /aws/lambda/alexa_chess_transcribe_url
-      RetentionInDays: 14
-
-  TranscribeUrlFunction:
-    Type: AWS::Serverless::Function
-    Properties:
-      FunctionName: alexa_chess_transcribe_url
-      Description: Presigned wss URL for Amazon Transcribe streaming (the Echo speaker's ears)
-      CodeUri: packages/transcribe-url
-      Handler: handler.handler
-      MemorySize: 128
-      Timeout: 5
-      Tracing: PassThrough
-      LoggingConfig:
-        LogFormat: JSON
-        LogGroup: !Ref TranscribeUrlLogGroup
-      Environment:
-        Variables:
-          ALLOWED_ORIGIN: !Ref AllowedOrigin
-          LANGUAGE_MODE: single
-          LANGUAGE_CODE: en-IN
-          LANGUAGE_OPTIONS: en-IN,hi-IN
-          VOCABULARY_NAMES: alexa_chess_vocabulary
-          STABILITY: high
-      FunctionUrlConfig:
-        AuthType: NONE
-        Cors:
-          AllowOrigins: [!Ref AllowedOrigin]
-          AllowMethods: [POST]
-          AllowHeaders: [content-type]
-          MaxAge: 300
-      Policies:
-        - Statement:
-            - Effect: Allow
-              Action: transcribe:StartStreamTranscriptionWebSocket
-              Resource: "*"
-    Metadata:
-      BuildMethod: esbuild
-      BuildProperties:
-        Format: esm
-        OutExtension: [.js=.mjs]
-        Target: es2022
-        Minify: false
-        Sourcemap: true
-        EntryPoints: [src/handler.ts]
-        Banner:
-          - js=import { createRequire as __bannerCreateRequire } from 'module'; const require = __bannerCreateRequire(import.meta.url);
-
-  TranscribeUrlInvokePermission:
-    Type: AWS::Lambda::Permission
-    Properties:
-      Action: lambda:InvokeFunction
-      FunctionName: !Ref TranscribeUrlFunction
-      Principal: "*"
-      InvokedViaFunctionUrl: true
-
   # ---------- Website (S3 + CloudFront) ----------
   WebsiteBucket:
     Type: AWS::S3::Bucket
@@ -348,9 +286,6 @@ Outputs:
   AgentUrl:
     Description: Agent chat endpoint (POST)
     Value: !GetAtt AgentFunctionUrl.FunctionUrl
-  TranscribeUrl:
-    Description: Presigned-URL endpoint for Transcribe streaming (POST)
-    Value: !GetAtt TranscribeUrlFunctionUrl.FunctionUrl
   WebsiteUrl:
     Description: Echo simulator
     Value: !Sub https://${WebsiteDistribution.DomainName}

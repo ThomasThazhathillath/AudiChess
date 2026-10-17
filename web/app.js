@@ -6,27 +6,18 @@
   const device = $("device"), live = $("live"), startEl = $("start"), startBtn = $("start-btn"), startNote = $("start-note");
   const debugEl = $("debug"), debugLog = $("debug-log"), langSel = $("lang");
 
-  const BUILD = "rival-1"; // shown in the debug drawer, to confirm which code the browser runs
+  const BUILD = "chrome-only-1"; // shown in the debug drawer, to confirm which code the browser runs
 
   const params = new URLSearchParams(location.search);
-  // Speech-to-text: Chrome's own recognizer, one phrase at a time (default), or Amazon Transcribe streaming
-  // (?stt=transcribe). Chrome in English (US) hears short chess phrases far better than Transcribe en-IN did ("24" for
-  // pawn d4, "Swansea 4" for c4), and it decides itself when a phrase is over, so nothing is cut or dropped by our timers.
+  // Speech-to-text: Chrome's own recognizer (Chrome or Edge), one phrase at a time. It costs nothing on AWS: Amazon
+  // Transcribe was removed on 2026-10-17 because of its cost, and Chrome in English (US) heard chess phrases better
+  // anyway. Chrome decides itself when a phrase is over, so nothing is cut or dropped by our timers.
   const Recognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-  let STT = params.get("stt") === "transcribe" || !Recognition ? "transcribe" : "chrome";
   // Open mic (default): a conversation, no "Alexa" needed; everything heard goes to the agent, which drops only what is
   // clearly background talk. ?wake=1 restores the wake word with its follow-up windows.
   const OPEN_MIC = params.get("wake") !== "1";
   const VERBOSE = params.has("verbose"); // log every mic cycle (one-phrase recognition restarts every few seconds)
-  // Barge-in: with Transcribe the mic stays open while she talks (echo cancellation removes most of her voice),
-  // and only "Alexa…" or "stop" interrupts. ?bargein=0 restores strict half-duplex (silence while she talks).
-  // Chrome's recognizer is always half-duplex, like a walkie-talkie: tap the speaker or press Esc to cut her off.
-  const BARGE_IN = params.get("bargein") !== "0";
-  // Optional Transcribe A/B switches: ?lang=multi (en-IN + hi-IN identification), ?stability=off|low|medium|high.
-  const sttOverrides = {
-    ...(params.get("lang") === "multi" ? { mode: "multi" } : /^(en-US|en-GB|hi-IN)$/.test(params.get("lang") || "") ? { languageCode: params.get("lang") } : {}),
-    ...(params.get("stability") ? { stability: params.get("stability") } : {}),
-  };
+  // The mic is half-duplex, like a walkie-talkie: closed while she talks; tap the speaker or press Esc to cut her off.
 
   // Chess ears (Vosk) open the mic a second time. With them running, Chrome's recognizer still saw "speech
   // detected" but returned almost no words for 40 minutes (2026-10-16 log), so they're off unless ?ears=1.
@@ -48,7 +39,6 @@
 
   // ---------- state ----------
   let agentUrl = null;
-  let transcribeUrl = null;
   let started = false;
   let muted = false;
   let busy = false;          // waiting for the agent
@@ -134,18 +124,12 @@
 
   // ---------- always-visible debug screen (until the app is tuned; ?debug=0 hides it) ----------
   const DS = params.get("debug") === "0" ? null : window.DebugScreen;
-  DS?.init({ state: () => ({ speaking, busy, muted, awakeUntil, followUpUntil, openMic: OPEN_MIC, halfDuplex: STT !== "transcribe" || !BARGE_IN }) });
-  /** Route a drawer note to the debug screen: what was heard and what happened to it; ear status up top. */
+  DS?.init({ state: () => ({ speaking, busy, muted, awakeUntil, followUpUntil, openMic: OPEN_MIC, halfDuplex: true }) });
+  /** Route a drawer note to the debug screen: what was heard and what happened to it. */
   function toScreen(text) {
     if (!DS) return;
     const quoted = (t) => /"([^"]*)"/.exec(t)?.[1] ?? t;
-    if (/^ears: mic level|^hearing "/.test(text)) return; // the meter and the live box show these
-    if (/^ears: connected/.test(text)) return DS.status(`ears: ${text.slice(6)}`);
-    if (/^ears: (disconnected|reconnecting|could not|connection stalled|bad frame|\w+Exception|microphone|no Transcribe)/.test(text)) {
-      DS.status(text, true);
-      return DS.event("error", text);
-    }
-    if (/^ears: audio at|^ears: mic "/.test(text)) return DS.event("info", text);
+    if (/^hearing "/.test(text)) return; // the live box shows these
     if (/^heard "/.test(text)) return DS.event("heard", quoted(text), text.replace(/^heard "[^"]*"\s*/, ""));
     if (/^ignored "/.test(text)) return DS.event("ignored", quoted(text), text.replace(/^ignored "[^"]*"\s*/, ""));
     if (/^dropped "/.test(text)) return DS.event("dropped", quoted(text), text.replace(/^dropped "[^"]*"\s*/, ""));
@@ -167,18 +151,6 @@
   // Local dev only: mirror the drawer to the local agent (packages/agent/eval-results/live/<date>-drawer.log), so a
   // real-mic session can be reviewed without access to this browser. Never on the deployed site.
   const isLocalAgent = () => !!agentUrl && /^http:\/\/(127\.0\.0\.1|localhost)[:/]/.test(agentUrl);
-  // ...and the exact audio streamed to Transcribe, one second at a time, so a bad transcript can be replayed.
-  let audioQueue = [], audioTimer = null;
-  function mirrorAudio(chunk) {
-    if (!isLocalAgent()) return;
-    audioQueue.push(chunk);
-    audioTimer ??= setTimeout(() => {
-      const body = new Blob(audioQueue);
-      audioQueue = [];
-      audioTimer = null;
-      fetch(new URL(`debug-audio?session=${encodeURIComponent(sessionId)}`, agentUrl), { method: "POST", body }).catch(() => {});
-    }, 1000);
-  }
   let mirrorQueue = [], mirrorTimer = null;
   function mirrorLog(line) {
     if (!isLocalAgent()) return;
@@ -261,14 +233,10 @@
   }
 
   // ---------- speaking (Polly MP3 from the agent, browser voice as fallback) ----------
-  let replyText = ""; // what she is saying now, to recognise her own voice leaking into the mic
-  let replyAsks = false; // her reply is a question: a short answer may cut in before she finishes
   function speak(data) {
     return new Promise((resolve) => {
       speaking = true;
-      replyText = data.reply || "";
-      replyAsks = !!data.expectsReply;
-      if (STT !== "transcribe" || !BARGE_IN) pauseListening();
+      pauseListening(); // never hear herself
       setState(data.error ? "error" : "speaking");
       let safety = null;
       const done = () => {
@@ -276,7 +244,7 @@
         clearTimeout(safety);
         speaking = false;
         currentAudio = null;
-        if (STT !== "transcribe" || !BARGE_IN) resumeListening();
+        resumeListening();
         resolve();
       };
       // An "ended" event that never comes (browser voices sometimes drop it) must not leave the mic shut for good:
@@ -325,6 +293,7 @@
   let speechAt = 0;          // first interim result of the utterance in progress
   let lastRecEventAt = 0;    // any event from the recognizer, for the watchdog
   let renewWhy = "";         // a real error: the next "end" builds a fresh recognizer
+  let unfinished = "";       // the latest interim words of the phrase in progress (no final result yet)
   // Every mic cycle (on, sound, speech, no-speech): on screen only with ?verbose, but always in the local mirror log,
   // so a deaf spell can be read afterwards (2026-10-17's couldn't: Chrome heard nothing, or sound but no speech?).
   const cycleNote = (text) => { if (VERBOSE) logNote(text); else mirrorLog(`${new Date().toLocaleTimeString()} · ${text}`); };
@@ -342,9 +311,18 @@
     // "phrases-not-supported" (only on-device recognition supports it), which killed the wake word.
     const on = (fn) => (e) => { if (r !== recognition) return; lastRecEventAt = Date.now(); fn(e); };
 
-    r.onstart = on(() => { listening = true; restartDelay = RESTART_MS; speechAt = 0; heardSpeech = false; gotWords = false; cycleNote("mic on"); });
+    r.onstart = on(() => { listening = true; restartDelay = RESTART_MS; speechAt = 0; heardSpeech = false; gotWords = false; unfinished = ""; cycleNote("mic on"); });
     r.onend = on(() => {
       listening = false;
+      // Chrome showed words but ended without a final result ("hearing "undo"…", then nothing, 2026-10-17 game):
+      // the last words it showed are the phrase.
+      if (unfinished && !speaking && !busy && !muted) {
+        const text = unfinished;
+        unfinished = "";
+        logNote(`heard "${text}" (Chrome never finished it)`);
+        handleUtterance([text], speechAt);
+        speechAt = 0;
+      }
       if (renewWhy) { const why = renewWhy; renewWhy = ""; return renewRecognition(why); }
       if (checkLanguageHealth()) return renewRecognition("speech detected twice but no words");
       cycleNote(`mic off${speaking ? " (Alexa speaking)" : busy ? " (thinking)" : muted ? " (muted)" : ", restarting"}`);
@@ -383,6 +361,7 @@
         const result = e.results[i];
         const top = result[0].transcript;
         if (!result.isFinal) {
+          unfinished = top.trim();
           DS?.hearing(top.trim());
           if (!speechAt) { speechAt = Date.now(); logNote(`hearing "${top.trim()}"…`); } // counts even if Chrome finalises later
           // Still talking: a held "bishop…" waits for the rest ("f4" was being said when the hold ran out, 2026-10-17).
@@ -393,6 +372,7 @@
           // "Alexa … let's play chess" in two and lost the command (2026-10-16 log). Chrome finalises itself.
           continue;
         }
+        unfinished = "";
         const alts = Array.from({ length: result.length }, (_, j) => result[j].transcript.trim()).filter(Boolean);
         if (alts.length) logNote(`heard "${alts[0]}"${alts.length > 1 ? ` (alternatives: ${alts.slice(1).join(" | ")})` : ""}`);
         handleUtterance(alts, speechAt);
@@ -419,7 +399,7 @@
   // A swallowed start() error or an "end" event that never comes would leave the mic off with nothing in the log.
   let offSince = 0;
   setInterval(() => {
-    if (!started || STT === "transcribe" || !recognition) return;
+    if (!started || !recognition) return;
     const now = Date.now();
     const should = wantListening && !muted && !speaking && !busy;
     if (!should || listening) offSince = 0;
@@ -434,88 +414,10 @@
   }, 1000);
   // Coming back to the tab: make sure the mic is running again.
   document.addEventListener("visibilitychange", () => {
-    if (document.visibilityState !== "visible" || !started || STT === "transcribe") return;
+    if (document.visibilityState !== "visible" || !started) return;
     cycleNote("tab visible again");
     if (!listening) startListening();
   });
-
-  // ---------- listening: Amazon Transcribe streaming (default) ----------
-  // One stream stays open while listening. Partials light the ring and mark when speech started; each final
-  // segment is one utterance for the same wake/follow-up gate (wake.js) that Chrome's results went through.
-  let ears = null;
-  const ECHO_TAIL_MS = 400; // half-duplex mode (?bargein=0): silence this long after Alexa stops, for room echo
-  const echoIds = new Set();    // Transcribe segments that began while Alexa spoke: her voice, never a command
-  const stoppedIds = new Set(); // segments whose "stop" already cancelled an answer
-
-  function makeEars() {
-    return new window.TranscribeEars({
-      getUrl: async () => {
-        if (!transcribeUrl) throw new Error("no transcribeUrl in config.json");
-        const res = await fetch(transcribeUrl, {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ sessionId, ...sttOverrides }),
-        });
-        const data = await res.json().catch(() => ({}));
-        if (!res.ok || !data.url) throw new Error(data.error || `HTTP ${res.status}`);
-        return data.url;
-      },
-      log: logNote,
-      onAudio: mirrorAudio,
-      endpointMs: window.AlexaWake.endpointMs,
-      onLevel: (rms) => DS?.level(rms),
-      onPartial: ({ text, id }) => {
-        DS?.hearing(text, muted ? "muted" : speaking ? "Alexa is speaking" : busy ? "she's thinking" : echoIds.has(id) ? "her own voice" : "");
-        if (muted) return;
-        if (speaking) {
-          // Barge-in: "Alexa…", "stop", or a short answer to her question; anything else now is her own voice or noise.
-          const progress = currentAudio?.duration ? currentAudio.currentTime / currentAudio.duration : undefined;
-          const b = window.AlexaWake.bargeIn(text, replyText, replyAsks, progress);
-          if (!b) { echoIds.add(id); return; }
-          echoIds.delete(id);
-          logNote(`interrupted by "${text}"`);
-          stopSpeaking();
-          if (b === "command") { speechAt = Date.now(); awakeUntil = Date.now() + AWAKE_MS; }
-          if (b === "answer") speechAt = Date.now(); // the follow-up window, set as she stops, takes the answer
-          return;
-        }
-        if (busy) {
-          // "stop" / "cancel" while she's thinking: drop the answer that is on its way.
-          if (pending && window.AlexaWake.bargeIn(text, "") === "stop") { stoppedIds.add(id); pending.abort(); }
-          return;
-        }
-        if (echoIds.has(id)) return;
-        if (!speechAt) { speechAt = Date.now(); logNote(`hearing "${text}"…`); }
-        // Light the ring the moment the wake word is heard, like a real Echo.
-        if (WAKE.test(text) && device.dataset.state === "idle") { earcon.wake(); setState("awake", "Listening"); }
-      },
-      onFinal: ({ text, alternatives, languageCode, id, early }) => {
-        if (echoIds.has(id) || stoppedIds.has(id)) { // her voice, or a "stop" already acted on
-          echoIds.delete(id);
-          stoppedIds.delete(id);
-          if (!early) logNote(`dropped "${text}" (${speaking ? "Alexa speaking" : "her own voice or a stop"})`);
-          speechAt = 0;
-          return;
-        }
-        if (speaking || busy || muted) {
-          logNote(`dropped "${text}" (${speaking ? "Alexa was speaking" : busy ? "still thinking" : "muted"})`);
-          speechAt = 0;
-          return;
-        }
-        logNote(`heard "${text}"${early ? " (end of speech)" : ""}${languageCode && languageCode !== "en-IN" ? ` [${languageCode}]` : ""}${alternatives.length > 1 ? ` (partials: ${alternatives.slice(1).join(" | ")})` : ""}`);
-        handleUtterance(alternatives, speechAt);
-        speechAt = 0;
-      },
-      onFatal: (why) => {
-        if (why === "no-url" && Recognition && STT === "transcribe") {
-          logNote("ears: no Transcribe URL after 3 tries: switching to Chrome speech recognition for this page");
-          STT = "chrome";
-          ears.suspend();
-          startListening();
-        }
-      },
-    });
-  }
 
   // ---------- chess ears fallback ----------
   // Chrome's recognizer sometimes detects speech but returns no words for minutes, with no error. Vosk still
@@ -613,23 +515,18 @@
   }
 
   function startListening() {
-    if (STT === "transcribe") { wantListening = true; if (!muted) ears?.activate(); return; }
     wantListening = true;
     if (!recognition || listening || muted || speaking || busy) return;
     recognition.lang = langSel.value;
     try { recognition.start(); } catch { /* already started */ }
   }
-  let echoTimer = null;
   function pauseListening() {
     window.ChessEars?.pause();
-    clearTimeout(echoTimer);
-    if (STT === "transcribe") { ears?.pause(); return; } // silence frames keep the stream open
     if (recognition && listening) recognition.abort();
   }
   function resumeListening() {
     if (!wantListening || muted) return;
     window.ChessEars?.resume();
-    if (STT === "transcribe") { clearTimeout(echoTimer); echoTimer = setTimeout(() => { if (!speaking) ears?.resume(); }, ECHO_TAIL_MS); return; }
     setTimeout(startListening, 150);
   }
 
@@ -639,14 +536,12 @@
     if (muted) {
       if (held) { clearTimeout(held.timer); held = null; }
       pauseListening();
-      if (STT === "transcribe") ears?.suspend(); // closes the stream: nothing is sent (or billed) while muted
       stopSpeaking();
       setState("muted", "Microphone off");
     } else {
       restState();
       live.textContent = "Microphone on";
       window.ChessEars?.resume();
-      if (STT === "transcribe") ears?.resume();
       startListening();
     }
   }
@@ -665,25 +560,6 @@
     audioCtx = new (window.AudioContext || window.webkitAudioContext)();
     startEl.hidden = true;
     earcon.wake();
-    if (STT === "transcribe") {
-      if (!navigator.mediaDevices?.getUserMedia || !window.AudioWorkletNode || !window.TranscribeEars) {
-        logNote("ears: this browser can't stream the mic: using Chrome speech recognition");
-        STT = "chrome";
-      } else {
-        setState(OPEN_MIC ? "followup" : "idle", READY);
-        ears = makeEars();
-        wantListening = true;
-        try {
-          await ears.start();
-        } catch (err) {
-          logNote(`ears: microphone failed (${err.name || ""} ${err.message || err})`);
-          wantListening = false;
-          setState("error", err.name === "NotAllowedError" ? "Microphone access is blocked. Allow it in the browser settings and reload." : "Couldn't open the microphone. Press D for details.");
-        }
-        if (EARS_ON) window.ChessEars?.start();
-        return;
-      }
-    }
     if (!recognition) {
       setState("error", "Voice input needs Chrome or Edge. Press D to type instead.");
       return;
@@ -735,20 +611,15 @@
     store.set(LANG_KEY, langSel.value);
     if (listening) recognition.abort(); // restarts with the new language
   });
-  const hearing = STT === "transcribe"
-    ? `Amazon Transcribe${Object.keys(sttOverrides).length ? ` ${JSON.stringify(sttOverrides)}` : ""}`
-    : `Chrome speech recognition (${langSel.value}), one phrase at a time (?stt=transcribe for Amazon Transcribe)`;
-  logNote(`build ${BUILD} · listening with ${hearing} · ${OPEN_MIC ? "open mic, no wake word (?wake=1 for \"Alexa\")" : "wake word \"Alexa\""}${EARS_ON ? " · chess ears ON" : ""}`);
+  logNote(`build ${BUILD} · listening with Chrome speech recognition (${langSel.value}), one phrase at a time · ${OPEN_MIC ? "open mic, no wake word (?wake=1 for \"Alexa\")" : "wake word \"Alexa\""}${EARS_ON ? " · chess ears ON" : ""}`);
   if (EARS_ON) window.ChessEars?.init({ log: logNote }); // fetch the chess-ears model while the start screen is up
-  if (STT === "chrome" && !Recognition) startNote.textContent = "This browser has no speech recognition. Use Chrome or Edge, or press D to type.";
+  if (!Recognition) startNote.textContent = "This browser has no speech recognition. Use Chrome or Edge, or press D to type.";
 
   // ---------- config + warm-up ----------
   fetch("config.json", { cache: "no-store" })
     .then((r) => r.json())
     .then((c) => {
       agentUrl = c.agentUrl;
-      transcribeUrl = c.transcribeUrl || null;
-      if (STT === "transcribe" && !transcribeUrl) logNote("config.json has no transcribeUrl: Transcribe ears can't start (redeploy, or use ?stt=chrome)");
       // Wake the Lambdas while the user is still reading the start screen.
       fetch(agentUrl, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ warm: true }) }).catch(() => {});
     })

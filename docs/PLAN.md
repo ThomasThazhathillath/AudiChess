@@ -861,3 +861,47 @@ Production check against the deployed agent (Nova 2 Lite and Polly):
 
 The check cost about $0.015. **Not yet played with a real microphone.** A local real-mic session logs every mic
 cycle to the drawer log, which shows whether any remaining deaf spell is Chrome's.
+
+## Phase 8b — Amazon Transcribe removed (2026-10-17)
+
+The user can't afford Transcribe ($1.29 of October's $7.22 usage, all from the Phase 6 tests), so it is gone
+completely. The page listens only with Chrome's (or Edge's) own recognizer, which costs nothing on AWS. A browser
+without it gets "Use Chrome or Edge, or press D to type" instead of a paid fallback.
+
+**Removed:**
+- **Page:** `web/transcribe.js`, `web/eventstream.js`, `web/pcm-worklet.js`, the `?stt=transcribe` path and its
+  switches (`?bargein`, `?lang=multi`, `?stability`), and the audio mirror.
+- **`wake.js`:** the Transcribe-only `bargeIn` and `endpointMs`.
+- **Infra:** the `alexa_chess_transcribe_url` Lambda (`packages/transcribe-url`) and its Function URL, policy and
+  log group in `template.yaml`. `config.json` no longer has `transcribeUrl`.
+- **Deploy:** the custom-vocabulary step in `deploy.ps1` (`-VocabularyOnly`), `infra/transcribe/vocabulary.txt`
+  and `scripts/build-vocabulary.mjs`.
+- **Tests:** `scripts/test-transcribe.mjs`, `test-ears.mjs`, `test-eventstream.mjs`.
+- **Local agent:** the `/transcribe-url` and `/debug-audio` routes.
+- **AWS:** the vocabulary `alexa_chess_vocabulary` and its file in the deploy bucket are deleted.
+
+Comments that cite mishearings collected from Transcribe stay: the move matcher still uses that data.
+
+**Also changed:**
+- **Unfinished phrases rescued:** when Chrome ends a phrase without a final result, the last words it showed are
+  used. In the first real-mic game of Phase 8, "undo" was shown on screen and then lost this way.
+- **The local agent defaults to Nova 2 Lite** (what production runs) instead of Nova Pro.
+
+**Checked:**
+- Tests: chess server 168, agent 79, page 57 checks. The 24 barge-in and endpoint checks went with `wake.js`'s
+  Transcribe helpers.
+- `sam validate --lint` passes.
+- Browser: build `chrome-only-1` loads with no missing scripts or errors. An unfinished "let's play chess" was
+  answered in 0.5 s.
+
+**Seen in that real-mic game:**
+- Chrome's own recognition had a bad spell: "contacts phone", "hello font text phone", "my text phone".
+- For about 40 s it detected speech six times and returned no words; two fresh recognizers didn't help.
+- That is Chrome's cloud recognizer, not our code. The new mic-cycle log is what showed it.
+
+**Deployed 2026-10-17** (build `chrome-only-1`):
+- The stack update deleted the Transcribe Lambda, its URL, role and log group. Only `alexa_chess_mcp_server`
+  and `alexa_chess_agent` remain.
+- The site no longer serves the Transcribe scripts, and `config.json` holds only `agentUrl`.
+- The vocabulary list in Transcribe is empty.
+- The deployed agent answered "let's play chess".

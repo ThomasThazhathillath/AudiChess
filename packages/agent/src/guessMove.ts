@@ -3,7 +3,7 @@ import type { ConverseCommandInput, ConverseCommandOutput, TokenUsage } from "@a
 /**
  * Accent-proof decoding of a spoken move the matcher couldn't place: the model sees only the legal moves (or the
  * matcher's candidates) and what speech recognition heard, and names the legal move that sounds closest, or none.
- * Kept free of the agent's other imports so the Polly accent test (scripts/test-transcribe.mjs) uses the same code.
+ * Kept free of the agent's other imports, so scripts can load it on its own.
  */
 export async function decodeMove(
   converse: (input: ConverseCommandInput) => Promise<ConverseCommandOutput>,
