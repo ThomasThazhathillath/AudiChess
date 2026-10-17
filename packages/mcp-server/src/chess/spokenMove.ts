@@ -41,6 +41,8 @@ const PIECE_WORDS: Record<string, PieceSymbol> = {
   king: "k", kings: "k",
   pawn: "p", pawns: "p", pond: "p", porn: "p", paun: "p", prawn: "p", pon: "p", palm: "p", pun: "p", born: "p", upon: "p",
   poon: "p", pound: "p", worn: "p", warn: "p",
+  // Chrome en-US in the 2026-10-17 real-mic game: "Sore pwn to E3", "phone h8", "night takes phone", "font text phone".
+  pwn: "p", pont: "p", porno: "p", pornhub: "p", pornhd: "p", phone: "p", phones: "p", font: "p",
 };
 
 /** A piece fused with the file letter after it ("pondi three" = pawn d3, "bishopi four" = bishop b4). The file only counts before a rank. */
@@ -91,7 +93,8 @@ const RANK_WORDS: Record<string, string> = {
 };
 const UNAMBIGUOUS_RANKS = new Set(["1", "2", "3", "4", "5", "6", "7", "8", "one", "two", "three", "four", "five", "six", "seven", "eight"]);
 
-const CAPTURE_WORDS = new Set(["takes", "take", "captures", "capture", "x", "eats", "by", "taking", "takes?"]);
+// "text" / "tax" / "tex": how Chrome writes a quick "takes" ("night text phone", "porn text C5").
+const CAPTURE_WORDS = new Set(["takes", "take", "captures", "capture", "x", "eats", "by", "taking", "takes?", "text", "texts", "tax", "tex", "tacks"]);
 const CASTLE_WORDS = new Set(["castle", "castles", "castling", "castled"]);
 const KING_SIDE = new Set(["kingside", "short"]);
 const QUEEN_SIDE = new Set(["queenside", "long"]);
@@ -205,6 +208,12 @@ export function tokenize(text: string): Token[] {
       continue;
     }
     if (w in PIECE_SQUARE_WORDS && out[out.length - 1]?.t === "piece") { out.push({ t: "square", sq: PIECE_SQUARE_WORDS[w] }); continue; }
+    // A short phrase opening with "on" and a square is the pawn ("on h8" for "pawn h8", Chrome, 2026-10-17); "on" is
+    // otherwise a filler ("knight on f3").
+    if (w === "on" && i === 0 && words.length <= 3 && next !== undefined && (/^[a-h][1-8][+#]*$/.test(next) || (next in FILE_WORDS && (words[i + 2] ?? "") in RANK_WORDS))) {
+      out.push({ t: "piece", p: "p" });
+      continue;
+    }
     if (w in PIECE_WORDS) { out.push({ t: "piece", p: PIECE_WORDS[w] }); continue; }
     // "even" is how "e1" arrives in Indian English ("rooked even check").
     if (w === "even" || w === "evan") { out.push({ t: "square", sq: "e1" }); continue; }

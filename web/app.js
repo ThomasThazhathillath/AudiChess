@@ -6,7 +6,7 @@
   const device = $("device"), live = $("live"), startEl = $("start"), startBtn = $("start-btn"), startNote = $("start-note");
   const debugEl = $("debug"), debugLog = $("debug-log"), langSel = $("lang");
 
-  const BUILD = "chrome-only-1"; // shown in the debug drawer, to confirm which code the browser runs
+  const BUILD = "pawn-1"; // shown in the debug drawer, to confirm which code the browser runs
 
   const params = new URLSearchParams(location.search);
   // Speech-to-text: Chrome's own recognizer (Chrome or Edge), one phrase at a time. It costs nothing on AWS: Amazon
@@ -17,6 +17,12 @@
   // clearly background talk. ?wake=1 restores the wake word with its follow-up windows.
   const OPEN_MIC = params.get("wake") !== "1";
   const VERBOSE = params.has("verbose"); // log every mic cycle (one-phrase recognition restarts every few seconds)
+  // ?ondevice=1: recognise on this computer instead of Google's cloud. Only then does Chrome accept word hints (its cloud
+  // refused them with "phrases-not-supported", 2026-10-16), so "pawn" can be boosted: Chrome wrote it as porn, pond,
+  // pwn, phone, font and "on" in the 2026-10-17 game. Experimental in Chrome: anything unsupported falls back to the cloud.
+  const ONDEVICE = params.has("ondevice");
+  const BOOSTS = [["pawn", 5], ["pawns", 3], ["takes", 3], ["knight", 3], ["bishop", 3], ["rook", 3], ["queen", 2], ["king", 2], ["castle", 2], ["kingside", 2], ["queenside", 2], ["undo", 2]];
+  let onDevice = false;
   // The mic is half-duplex, like a walkie-talkie: closed while she talks; tap the speaker or press Esc to cut her off.
 
   // Chess ears (Vosk) open the mic a second time. With them running, Chrome's recognizer still saw "speech
@@ -307,8 +313,11 @@
     r.continuous = false;
     r.interimResults = true; // live captions and the start time only; just the final phrase is sent
     r.maxAlternatives = 5;   // n-best readings for the spoken-move matcher
-    // No `phrases` biasing: Chrome exposes it, but its cloud recognizer then fails every start with
-    // "phrases-not-supported" (only on-device recognition supports it), which killed the wake word.
+    // Word hints only on-device: the cloud recognizer fails every start with "phrases-not-supported".
+    if (onDevice) {
+      r.processLocally = true;
+      if (window.SpeechRecognitionPhrase && "phrases" in r) r.phrases = BOOSTS.map(([p, b]) => new window.SpeechRecognitionPhrase(p, b));
+    }
     const on = (fn) => (e) => { if (r !== recognition) return; lastRecEventAt = Date.now(); fn(e); };
 
     r.onstart = on(() => { listening = true; restartDelay = RESTART_MS; speechAt = 0; heardSpeech = false; gotWords = false; unfinished = ""; cycleNote("mic on"); });
@@ -344,6 +353,10 @@
         if (!muted) toggleMute();
         setState("muted", "Microphone off. Tap the speaker to turn it back on.");
         return;
+      }
+      if (onDevice && /not-supported|language|phrases/.test(e.error)) {
+        onDevice = false; // the fresh recognizer below is the normal cloud one
+        logNote(`on-device speech failed (${e.error}): back to Chrome's cloud recognizer`);
       }
       restartDelay = Math.min(restartDelay * 2, 5000);
       renewWhy = `after "${e.error}"`;
@@ -394,6 +407,26 @@
   }
 
   if (Recognition) recognition = makeRecognition();
+
+  /** ?ondevice=1, on the Start tap (installing a model needs a user gesture): the local model, downloaded if needed. */
+  async function prepareOnDevice() {
+    if (!ONDEVICE || !Recognition) return;
+    const lang = langSel.value;
+    try {
+      if (typeof Recognition.available !== "function") throw new Error("this browser has no on-device recognition");
+      let state = await Recognition.available({ langs: [lang], processLocally: true });
+      if (state === "downloadable" || state === "downloading") {
+        logNote(`on-device speech: downloading the ${lang} model…`);
+        state = (await Recognition.install({ langs: [lang], processLocally: true })) ? "available" : "unavailable";
+      }
+      if (state !== "available") throw new Error(`the ${lang} model is ${state}`);
+      onDevice = true;
+      recognition = makeRecognition();
+      logNote(`on-device speech on (${lang}), ${window.SpeechRecognitionPhrase ? "\"pawn\" boosted" : "but this browser takes no word boosts"}`);
+    } catch (err) {
+      logNote(`on-device speech off: ${err.message || err}; using Chrome's cloud recognizer`);
+    }
+  }
 
   // ---------- watchdog: the mic is on whenever it should be ----------
   // A swallowed start() error or an "end" event that never comes would leave the mic off with nothing in the log.
@@ -565,7 +598,8 @@
       return;
     }
     setState(OPEN_MIC ? "followup" : "idle", READY);
-    DS?.status(`ears: Chrome speech recognition (${langSel.value}), one phrase at a time`);
+    await prepareOnDevice();
+    DS?.status(`ears: Chrome speech recognition (${langSel.value})${onDevice ? ", on this computer" : ""}, one phrase at a time`);
     startListening();
     if (EARS_ON) window.ChessEars?.start(); // optional second recognizer; stays off if its model isn't there
   });

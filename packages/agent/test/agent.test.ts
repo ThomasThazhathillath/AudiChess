@@ -532,6 +532,12 @@ describe("Phase 6: background speech, speed and shorter answers", () => {
     expect(addressedToAlexa(["ok fine", "Nokia 5"], { ...quiet, gameId: undefined })).toBe(false); // no game
     expect(looksLikeMove("Vineet", "Queen 8")).toBe(true);
     expect(looksLikeMove("kaun si", "Pawan Singh 7")).toBe(true);
+    // Chrome's "pawn" and "takes" in the evening game: these go to the board, not to "say it again".
+    expect(looksLikeMove("phone h8")).toBe(true);
+    expect(looksLikeMove("my text phone", "night text phone", "night takes phone")).toBe(true);
+    expect(looksLikeMove("hello font text phone")).toBe(true);
+    expect(looksLikeMove("Sore pwn to E3")).toBe(true);
+    expect(isFaintMove(["my text phone", "night text phone"], quiet)).toBe(false);
     // Only faintly a move: asked again in a few words, without the model (it once guessed queen to e2).
     for (const heard of [["ok fine", "Nokia 5"], ["K5"], ["1087"], ["sorry", "sorry ruk"]]) expect(isFaintMove(heard, quiet), heard.join(" | ")).toBe(true);
     for (const heard of [["Vineet", "Queen 8"], ["hint"], ["what's 2 plus 2?"], ["my queen"], ["thank you"]]) expect(isFaintMove(heard, quiet), heard.join(" | ")).toBe(false);

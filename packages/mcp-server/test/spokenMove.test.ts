@@ -77,6 +77,34 @@ describe("stage A: homophones and spoken notation", () => {
 });
 
 // Mishearings from a real Chrome en-IN game.
+describe("Chrome's 'pawn' mishearings (2026-10-17 real-mic game)", () => {
+  it.each([
+    [["Sore pwn pwn to E3, right?", "Sore pwn to E3"], "e3"],
+    [["pont e4"], "e4"],
+    [["pwn d4"], "d4"],
+    [["porno d4"], "d4"],
+  ])("start position: %j -> %s", (said, san) => {
+    expect(heard(new Chess(), ...said)).toMatchObject({ kind: "move", san });
+  });
+
+  it("'on h8' and 'phone h8' are the pawn promoting", () => {
+    const c = new Chess("8/7P/8/k7/8/8/8/4K3 w - - 0 1");
+    expect(heard(c, "on h8", "phone h8", "porn HD", "on h 8")).toMatchObject({ kind: "move", san: "h8=Q" });
+    expect(heard(c, "phone h8")).toMatchObject({ kind: "move", san: "h8=Q" });
+  });
+
+  it("'takes phone' is takes pawn ('night takes phone' was played as knight to h4)", () => {
+    const c = new Chess("4k3/8/8/3p4/8/4N3/8/4K3 w - - 0 1");
+    expect(heard(c, "my text phone", "night text phone", "night takes phone", "night text form", "Night take phone")).toMatchObject({ kind: "move", san: "Nxd5" });
+  });
+
+  it("'font text phone' is pawn takes pawn, and 'text' / 'tax' are takes", () => {
+    expect(heard(after("e4", "d5"), "hello font text phone")).toMatchObject({ kind: "move", san: "exd5" });
+    expect(heard(after("d4", "c5"), "porn text C5")).toMatchObject({ kind: "move", san: "dxc5" });
+    expect(heard(after("d4", "c5"), "pawn tax c5")).toMatchObject({ kind: "move", san: "dxc5" });
+  });
+});
+
 describe("en-IN mishearings", () => {
   // 1.e4 e6 2.Nf3 d5 3.Nc3 d4: the d2 pawn can only go to d3.
   const french = () => after("e4", "e6", "Nf3", "d5", "Nc3", "d4");

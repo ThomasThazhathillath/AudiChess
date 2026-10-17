@@ -63,7 +63,7 @@
    */
   function incomplete(text) {
     const t = String(text || "").trim().toLowerCase().replace(/[.!,?]+$/, "");
-    return /^(?:(?:hey )?alexa,? )?(?:(?:um|uh|okay|ok|so|and|move|play|my|the)\s+)*(?:knight|night|bishop|rook|queen|king|pawn|porn|horse)(?:\s+(?:to|takes|on|goes to|captures))?$/.test(t);
+    return /^(?:(?:hey )?alexa,? )?(?:(?:um|uh|okay|ok|so|and|move|play|my|the)\s+)*(?:knight|night|bishop|rook|queen|king|pawn|porn|pond|pont|pwn|horse)(?:\s+(?:to|takes|text|tax|on|goes to|captures))?$/.test(t);
   }
 
   /** "Pause", "stop listening", "go to sleep": close the open mic (tap the speaker or press M to talk again). */
@@ -74,7 +74,7 @@
    * The mic sleeps only when no other reading sounds like chess: "pause" was most likely "pawn" when it came right
    * after "Did you mean pawn to d4?" (2026-10-17 log), and muting there made her seem deaf.
    */
-  const CHESS_LIKE = /\b(?:pawn|porn|pond|pawan|knight|night|bishop|rook|ruk|queen|king|castle)\w*|\b[a-h]\s?[1-8]\b/i;
+  const CHESS_LIKE = /\b(?:pawn|porn|pond|pont|pwn|pawan|knight|night|bishop|rook|ruk|queen|king|castle)\w*|\b[a-h]\s?[1-8]\b/i;
   /** Any of these readings sounds like chess (a piece or a square): then a lone "pause" / "stop" is not one. */
   const soundsLikeChess = (alts) => (alts || []).some((a) => CHESS_LIKE.test(String(a || "")));
   const isSleepCommand = (alts) => isSleep(alts?.[0]) && !soundsLikeChess((alts || []).slice(1));

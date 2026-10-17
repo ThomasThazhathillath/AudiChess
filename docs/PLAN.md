@@ -905,3 +905,39 @@ Comments that cite mishearings collected from Transcribe stay: the move matcher 
 - The site no longer serves the Transcribe scripts, and `config.json` holds only `agentUrl`.
 - The vocabulary list in Transcribe is empty.
 - The deployed agent answered "let's play chess".
+
+## Phase 8c — "pawn" heard better (2026-10-17)
+
+Chrome often mishears "pawn". In the day's logs it wrote:
+- **"pawn":** porn, pornhd, pornhub, pond, pont, Pawan, pwn, phone, font, and a bare "on" ("on h8").
+- **"takes":** text, tax, tex.
+
+The pawn moves that worked were the ones said as just the square ("D4", "H7 takes G8").
+
+Chrome's cloud recognizer can't be tuned: it refuses word hints. So the fix is in our matching, plus an opt-in try
+of Chrome's newer on-device recognizer, which does take hints.
+
+**Matcher** (`spokenMove.ts`):
+- New pawn words: pwn, pont, porno, pornhub, pornhd, phone, phones, font.
+- "text" / "texts" / "tax" / "tex" / "tacks" count as takes.
+- A short phrase opening with "on" plus a square is the pawn.
+- "Night takes phone" is now knight takes pawn; it was played as knight to h4. "Font text phone" is pawn takes
+  pawn, "phone h8" promotes.
+
+**Agent and page:**
+- Captures named only by pieces ("night text phone") count as moves, not faint re-asks.
+- `wake.js` holds a lone "pwn…" / "pont…" for the square.
+
+**`?ondevice=1`** (opt-in):
+- On the Start tap the page asks Chrome for its on-device English model (`SpeechRecognition.available` / `install`,
+  downloaded once).
+- If it's there, it recognizes on the computer with `processLocally` and boosts "pawn" (5), "takes", the piece names
+  and castling words through `SpeechRecognitionPhrase`.
+- Anything unsupported, including a failure mid-game, falls back to the cloud recognizer, and the drawer says so.
+- The Claude browser pane (Chrome 152) has the API but reports the model as unavailable, and fell back cleanly.
+  The user's own Chrome is the real test.
+
+**Speaking tip:** for a pawn move, say just the square ("e4", "d takes e5"), as in chess notation. It skips the
+word Chrome hears worst.
+
+**Tests:** chess server 175 (7 new, from the logged phrases), agent 79, page 59 checks.

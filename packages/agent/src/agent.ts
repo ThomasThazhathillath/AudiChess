@@ -528,13 +528,16 @@ export function looksLikeMove(...heard: string[]): boolean {
   if (QUESTION_WORDS.test(first) || QUESTION_START.test(first) || /\?\s*$/.test(first)) return false;
   // Each alternative on its own: "24" (pawn d4) is only move-shaped as a whole utterance. Accents also give a piece
   // name plus a mangled square ("night S3", "night ef three", "92 S3").
-  return heard.some((h) => !!h && (SQUARE_ISH.test(h) || PIECE_THEN_RANK.test(h) || /^\W*9[1-8]\s+[a-z]{1,2}\s?[1-8]\W*$/i.test(h)));
+  return heard.some((h) => !!h && (SQUARE_ISH.test(h) || PIECE_THEN_RANK.test(h) || PIECE_TAKES_PIECE.test(h) || /^\W*9[1-8]\s+[a-z]{1,2}\s?[1-8]\W*$/i.test(h)));
 }
 // A bare rank counts too: "Queen 8" was an alternative of a dropped "Vineet" (2026-10-17 log), "Pawan Singh 7" of "kaun si".
 // A piece word may run into the next sound ("pornh sex" = pawn h6, dropped in silence on 2026-10-17).
-const PIECE_THEN_RANK = /\b(?:knight|night|nite|pawn|porn|pond|pawan|bishop|rook|rock|ruk|queen|king|horse)\w*.*(?:\b[a-z]{1,2}\s?[1-8]|\b[1-8]\b|\b(?:one|two|three|four|five|six|seven|eight|sex|tree|free)\b)/i;
+// Chrome's "pawn" in the 2026-10-17 game: pwn, pont, phone, font ("phone h8", "Sore pwn to E3", "font text phone").
+const PIECE_THEN_RANK = /\b(?:knight|night|nite|pawn|porn|pond|pont|pwn|pawan|phone|font|bishop|rook|rock|ruk|queen|king|horse)\w*.*(?:\b[a-z]{1,2}\s?[1-8]|\b[1-8]\b|\b(?:one|two|three|four|five|six|seven|eight|sex|tree|free)\b)/i;
+/** "Knight takes pawn" with no square, as Chrome writes it ("night text phone", "font text phone"): a capture by name. */
+const PIECE_TAKES_PIECE = /\b(?:knight|night|nite|pawn|porn|pond|pont|pwn|pawan|font|bishop|rook|rock|ruk|queen|king|horse)\w*\s+(?:takes|take|text|texts|tax|tex|x|captures)\s+(?:the |my |your )?(?:knight|night|pawn|porn|pond|pwn|phone|font|bishop|rook|rock|queen|king)\w*\b/i;
 /** Something chess-shaped somewhere in an alternative: a piece or its sound-alike, a digit ("Nokia 5", "K5", "1087") or "six". */
-const MOVE_HINT = /\b(?:knight|night|nite|pawn|porn|pond|pawan|bishop|rook|rock|ruk|queen|king|horse|castle)\w*|[1-8]|\b(?:sex|six|sikh)\b/i;
+const MOVE_HINT = /\b(?:knight|night|nite|pawn|porn|pond|pont|pwn|pawan|bishop|rook|rock|ruk|queen|king|horse|castle)\w*|[1-8]|\b(?:sex|six|sikh)\b/i;
 
 /** Strips a leading wake word so "Alexa, knight f3" reaches the model as "knight f3". */
 export function stripWakeWord(text: string): string {

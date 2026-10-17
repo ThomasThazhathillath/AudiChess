@@ -70,7 +70,10 @@ assert.equal(isSleepCommand(["knight f3"]), false);
 const { soundsLikeChess } = globalThis.AlexaWake;
 assert.equal(soundsLikeChess(["pawn", "paws"]), true);
 assert.equal(soundsLikeChess(["paws", "pours"]), false);
-console.log(`wake.js: ${n + 11 + 5 + 14 + 7 + 8} checks passed`);
+// Chrome's "pawn" (2026-10-17 game): a lone "pwn…" / "pont…" is held for the square too.
+assert.equal(incomplete("pwn"), true);
+assert.equal(incomplete("pont takes"), true);
+console.log(`wake.js: ${n + 11 + 5 + 14 + 7 + 10} checks passed`);
 
 // ---------- vosk.js: timeline, hearings, pairing with Chrome ----------
 new Function(readFileSync(new URL("../web/vosk.js", import.meta.url), "utf8"))();
