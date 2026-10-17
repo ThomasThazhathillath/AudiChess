@@ -846,6 +846,18 @@ calibration and the rival sim run on local Stockfish at no cost.
 - **Page 81 checks** (was 73): "pause" vs "pawn".
 
 ### Status
-Built, tested locally and in the browser with a scripted recognizer. **Not yet played with a real microphone, not
-committed and not deployed.** The next real-mic session will log every mic cycle to the local drawer log, which
-shows whether any remaining deaf spell is Chrome's.
+**Committed** (`3638461`). **Deployed 2026-10-17** (`.\scripts\deploy.ps1`, build `rival-1`,
+https://d2ammv4cvnzsu5.cloudfront.net).
+
+Production check against the deployed agent (Nova 2 Lite and Polly):
+- the new game said "I'm easy, about 800" (4.8 s, a cold start);
+- moves took 0.6–1.4 s;
+- the hint took 0.5 s, worded "according to the engine";
+- "bishop a6??" got "A free piece? Don't mind if I do.";
+- undo, then "what should I have played?", gave the engine's move in 0.3 s and 0.6 s;
+- the short board read-out took 1.1 s;
+- "ok fine" | "Nokia 5" was asked again in 0.3 s;
+- "who's winning?" took 2.0 s.
+
+The check cost about $0.015. **Not yet played with a real microphone.** A local real-mic session logs every mic
+cycle to the drawer log, which shows whether any remaining deaf spell is Chrome's.
