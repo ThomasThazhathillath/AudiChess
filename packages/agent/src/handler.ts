@@ -30,7 +30,7 @@ const respond = (statusCode: number, body: unknown): LambdaFunctionURLResult => 
 export const handler = async (event: LambdaFunctionURLEvent): Promise<LambdaFunctionURLResult> => {
   if (event.requestContext.http.method !== "POST") return respond(405, { error: "POST { sessionId, text, alternatives? }" });
 
-  let body: { sessionId?: unknown; text?: unknown; alternatives?: unknown; chessHeard?: unknown; warm?: unknown };
+  let body: { sessionId?: unknown; text?: unknown; alternatives?: unknown; chessHeard?: unknown; warm?: unknown; woken?: unknown };
   try {
     const raw = event.isBase64Encoded ? Buffer.from(event.body ?? "", "base64").toString() : (event.body ?? "");
     body = JSON.parse(raw);
@@ -57,7 +57,9 @@ export const handler = async (event: LambdaFunctionURLEvent): Promise<LambdaFunc
 
   const started = Date.now();
   try {
-    const result = await runTurn(deps, sessionId, { text: text.trim(), alternatives, chessHeard });
+    // woken: false = heard in conversation mode without "Alexa" (may be background talk). Missing = true.
+    const woken = body.woken !== false;
+    const result = await runTurn(deps, sessionId, { text: text.trim(), alternatives, chessHeard, woken });
     console.log(
       JSON.stringify({
         level: "info",
@@ -66,10 +68,13 @@ export const handler = async (event: LambdaFunctionURLEvent): Promise<LambdaFunc
         text,
         alternatives,
         chessHeard,
+        woken,
+        ignored: result.ignored === true,
         reply: result.reply,
         tools: result.toolCalls.map((t) => t.name),
         model: deps.modelId,
         usage: result.usage,
+        timings: result.timings,
         pollyChars: result.audio ? result.reply.length : 0,
         ms: Date.now() - started,
       }),

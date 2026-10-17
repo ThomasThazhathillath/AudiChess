@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { McpServer } from "@modelcontextprotocol/server";
-import { Chess, type Color, type Move } from "chess.js";
+import { Chess, type Color, type Move, type Square } from "chess.js";
 import * as z from "zod";
 import {
   IllegalMoveError,
@@ -9,6 +9,7 @@ import {
   material,
   moveToUci,
   piecesOf,
+  playHumanMove,
   suggestMoves,
   readBoard,
   replay,
@@ -17,7 +18,25 @@ import {
   statusOf,
   uciToObject,
 } from "./chess/game.js";
-import { LEVELS, type SearchResult } from "./chess/engine.js";
+import { LEVELS, type Line, type SearchResult } from "./chess/engine.js";
+import {
+  activity,
+  castleWhy,
+  centre,
+  control,
+  development,
+  explainIllegal,
+  forks,
+  kingSafety,
+  lostPieces,
+  nullMoveFen,
+  openFiles,
+  other,
+  pawnStructure,
+  phase,
+  pins,
+  shots,
+} from "./chess/insight.js";
 import {
   alertsFor,
   classifyMove,
@@ -25,21 +44,24 @@ import {
   evalSwing,
   evalTrend,
   forWhite,
+  hangingPieces,
   materialBalance,
   moveIdeas,
   spokenMaterial,
   type MoveQuality,
 } from "./chess/analysis.js";
 import { currentOpening } from "./chess/openings.js";
-import { confirmQuestion, resolveSpokenMove } from "./chess/spokenMove.js";
-import { colorName, spokenMove, spokenPieceList } from "./chess/spoken.js";
+import { confirmQuestion, isCastleChoice, readSpecs, resolveSpokenMove } from "./chess/spokenMove.js";
+import { PIECE_NAMES, colorName, spokenMove, spokenPieceList } from "./chess/spoken.js";
 import type { GameRecord, GameStore, MoveRecord } from "./store.js";
 
 export interface Engine {
-  move(uciMoves: string[], level: number): Promise<string>;
-  best(uciMoves: string[]): Promise<string>;
+  move(uciMoves: string[], level: number, startFen?: string): Promise<string>;
+  best(uciMoves: string[], startFen?: string): Promise<string>;
   /** Quick full-strength evaluation for commentary. */
-  analyse(uciMoves: string[]): Promise<SearchResult>;
+  analyse(uciMoves: string[], startFen?: string): Promise<SearchResult>;
+  /** Top moves with scores for any position (MultiPV), for analysis questions. */
+  top(fen: string, count?: number, movetimeMs?: number): Promise<Line[]>;
 }
 
 export interface Deps {
@@ -64,6 +86,9 @@ const fail = (speech: string, extra: Record<string, unknown> = {}): ToolResult =
 
 class UserFacingError extends Error {}
 
+/** Chess notation rather than spoken words ("Ke2", "exd5", "O-O"). */
+const SAN_LIKE = /^(?:[KQRBN]?[a-h]?[1-8]?x?[a-h][1-8](?:=[QRBN])?|O-O(?:-O)?|[a-h][1-8][a-h][1-8][qrbn]?)[+#]?$/;
+
 const gameIdSchema = z.string().min(1).describe("The gameId returned by new_game.");
 
 const SERVER_INSTRUCTIONS = `Blind chess for voice assistants. The user cannot see a board.
@@ -87,7 +112,7 @@ export function createChessServer(deps: Deps): McpServer {
     const game = await store.getGame(gameId);
     if (!game) throw new UserFacingError(`I can't find a game with id ${gameId}. Start a new game first.`);
     const moves = await store.getMoves(gameId);
-    return { game, moves, chess: replay(moves.map((m) => m.uci)) };
+    return { game, moves, chess: replay(moves.map((m) => m.uci), game.startFen) };
   }
 
   async function record(
@@ -95,13 +120,13 @@ export function createChessServer(deps: Deps): McpServer {
     chess: Chess,
     move: Move,
     by: "human" | "engine",
-    extra: Pick<MoveRecord, "evalCp" | "quality" | "bestSan" | "opening"> = {},
+    extra: Pick<MoveRecord, "evalCp" | "quality" | "bestSan" | "opening" | "lossCp"> = {},
   ): Promise<MoveRecord> {
     const ply = chess.history().length;
     const rec: MoveRecord = {
       gameId: game.gameId,
       ply,
-      moveNumber: Math.ceil(ply / 2),
+      moveNumber: Number(move.before.split(" ")[5]) || Math.ceil(ply / 2),
       color: move.color,
       by,
       san: move.san,
@@ -116,7 +141,7 @@ export function createChessServer(deps: Deps): McpServer {
   }
 
   async function playEngine(game: GameRecord, chess: Chess): Promise<{ rec: MoveRecord; move: Move }> {
-    const uci = await engine.move(uciHistory(chess), game.level);
+    const uci = await engine.move(uciHistory(chess), game.level, game.startFen);
     const openingBefore = currentOpening(chess)?.name;
     const move = chess.move(uciToObject(uci));
     const opening = currentOpening(chess)?.name;
@@ -127,9 +152,9 @@ export function createChessServer(deps: Deps): McpServer {
   const uciHistory = (chess: Chess) => chess.history({ verbose: true }).map((m) => moveToUci(m));
 
   /** Evaluation failures must never block a move: commentary is optional. */
-  async function tryAnalyse(chess: Chess): Promise<SearchResult | undefined> {
+  async function tryAnalyse(chess: Chess, startFen?: string): Promise<SearchResult | undefined> {
     try {
-      return await engine.analyse(uciHistory(chess));
+      return await engine.analyse(uciHistory(chess), startFen);
     } catch (err) {
       console.error(JSON.stringify({ level: "warn", msg: "analysis failed", error: String(err) }));
       return undefined;
@@ -154,7 +179,9 @@ export function createChessServer(deps: Deps): McpServer {
   function guard(fn: () => Promise<ToolResult>): Promise<ToolResult> {
     return fn().catch((err: unknown) => {
       if (err instanceof IllegalMoveError) {
-        return fail(`${err.message} Some legal options: ${err.suggestions.join("; ")}.`, { suggestions: err.suggestions });
+        // Two options at most: a list of six read aloud was the most annoying thing in the 2026-10-16 live game.
+        const top = err.suggestions.slice(0, 2).map((s) => s.replace(/^\S+ \((.*)\)$/, "$1"));
+        return fail(`${err.message}${top.length ? ` You could play ${top.join(" or ")}.` : ""}`, { suggestions: err.suggestions.slice(0, 2), ...(err.reason ? { reason: err.reason } : {}) });
       }
       if (err instanceof UserFacingError) return fail(err.message);
       console.error(JSON.stringify({ level: "error", msg: "tool failed", error: String(err), stack: (err as Error)?.stack }));
@@ -175,30 +202,49 @@ export function createChessServer(deps: Deps): McpServer {
         color: z.enum(["white", "black", "random"]).default("white").describe("The user's side."),
         level: z.number().int().min(1).max(8).default(3).describe("Engine strength 1-8."),
         sessionId: z.string().optional().describe("Optional caller session id to link the game to."),
+        fen: z.string().optional().describe("Start from this position instead of the normal start (puzzles, tests)."),
+        setupMoves: z.array(z.string()).max(200).optional().describe("Moves (SAN or UCI) to play first, recorded as the game so far."),
       }),
     },
-    ({ color, level, sessionId }) =>
+    ({ color, level, sessionId, fen, setupMoves }) =>
       guard(async () => {
         const humanColor: Color = color === "random" ? (Math.random() < 0.5 ? "w" : "b") : color === "white" ? "w" : "b";
-        const chess = new Chess();
+        let chess: Chess;
+        try {
+          chess = new Chess(fen);
+        } catch (e) {
+          throw new UserFacingError(`That position isn't valid: ${(e as Error).message}`);
+        }
         let game: GameRecord = {
           gameId: randomUUID(),
           humanColor,
           level,
           status: "active",
           fen: chess.fen(),
+          ...(fen ? { startFen: chess.fen() } : {}),
           plyCount: 0,
           sessionId,
           createdAt: now(),
           updatedAt: now(),
         };
         await store.putGame(game);
+        // A set-up history (tests, "continue from this game"): recorded like real moves, no engine analysis.
+        for (const m of setupMoves ?? []) {
+          let move: Move;
+          try {
+            move = playHumanMove(chess, m);
+          } catch {
+            throw new UserFacingError(`Setup move ${m} isn't legal at ply ${chess.history().length + 1}.`);
+          }
+          await record(game, chess, move, move.color === humanColor ? "human" : "engine");
+        }
+        if (fen || setupMoves?.length) game = await saveState(game, chess);
         let speech = `New game started. You are ${colorName(humanColor)}, and I'm playing at level ${level}, ${LEVELS[level].label}.`;
         let engineMoveRec: MoveRecord | undefined;
-        if (humanColor === "b") {
+        if (chess.turn() !== humanColor && statusOf(chess).status === "active") {
           engineMoveRec = (await playEngine(game, chess)).rec;
           game = await saveState(game, chess);
-          speech += ` I open with ${engineMoveRec.spoken}. Your move.`;
+          speech += ` I ${chess.history().length === 1 ? "open with" : "play"} ${engineMoveRec.spoken}. Your move.`;
         } else {
           speech += " Your move.";
         }
@@ -225,9 +271,10 @@ export function createChessServer(deps: Deps): McpServer {
         gameId: gameIdSchema,
         move: z.string().min(1).describe("Your best reading of the user's move: SAN or UCI preferred, raw words accepted."),
         alternatives: z.array(z.string()).max(5).optional().describe("Raw speech-recognition transcripts, best first."),
+        preview: z.boolean().optional().describe("Only work out which move was meant; don't play it (confirm-before-playing mode)."),
       }),
     },
-    ({ gameId, move, alternatives }) =>
+    ({ gameId, move, alternatives, preview }) =>
       guard(async () => {
         let { game, moves, chess } = await load(gameId);
         if (game.status !== "active") throw new UserFacingError(`That game is already over (${game.status}). Start a new game to play again.`);
@@ -237,12 +284,34 @@ export function createChessServer(deps: Deps): McpServer {
 
         const resolution = resolveSpokenMove(chess, move, alternatives ?? []);
         if (resolution.kind === "confirm") {
-          const speech = confirmQuestion(chess, resolution);
-          return ok({ speech, needsConfirmation: true, candidates: resolution.candidates, heard: resolution.heard });
+          const spec = resolution.reason === "illegal" ? [move, ...(alternatives ?? [])].map((t) => readSpecs(t)[0]).find((s) => s && (s.to || s.castle)) : undefined;
+          const why = spec ? explainIllegal(chess, game.humanColor, { to: spec.to, piece: spec.piece, from: spec.from, castle: spec.castle, capture: spec.capture }) : undefined;
+          const speech = confirmQuestion(chess, resolution, why);
+          // `doubt` lets the assistant decide instead of asking: "unclear"/"ambiguous" words can be resolved to the best
+          // guess, "illegal" means the words named a real move that can't be played (`why`), "which" is a board question.
+          const ms = resolution.candidates.map((s) => new Chess(chess.fen()).move(s));
+          const which = (ms.length === 2 && ms[0].piece === ms[1].piece && ms[0].to === ms[1].to) || isCastleChoice(ms);
+          const spokenCandidates = ms.map((m) => spokenMove(m));
+          return ok({ speech, needsConfirmation: true, candidates: resolution.candidates, spokenCandidates, heard: resolution.heard, doubt: which ? "which" : resolution.reason, why });
         }
         if (resolution.kind === "none") {
           const said = resolution.heard ?? move;
-          throw new IllegalMoveError(`"${said}" isn't a legal move here.`, suggestMoves(chess, move));
+          // Say why, when the words named a piece and a square ("your bishop on c1 is blocked by your pawn on d2").
+          const spec = [move, ...(alternatives ?? [])].map((t) => readSpecs(t)[0]).find((s) => s && (s.to || s.castle));
+          const reason = spec ? explainIllegal(chess, game.humanColor, { to: spec.to, piece: spec.piece, from: spec.from, castle: spec.castle, capture: spec.capture }) : undefined;
+          const words = String(said).trim().split(/\s+/).length;
+          // Repeat what was heard, so a mishearing ("a 6" for e6) is obvious to the player.
+          const heardSaid = String(said).trim().replace(/[.!?]+$/, "");
+          const quotable = words <= 8 && !SAN_LIKE.test(heardSaid); // notation ("Ke2") isn't what the player said
+          const message = reason
+            ? quotable ? `I heard "${heardSaid}": that isn't possible, ${reason}.` : `That move isn't possible: ${reason}.`
+            : quotable ? `I heard "${heardSaid}", but that isn't a legal move here.` : "I didn't catch a legal move there.";
+          // Castling has its own reason; other moves get related suggestions (same piece or square) when there are any.
+          throw new IllegalMoveError(message, spec?.castle ? [] : suggestMoves(chess, spec ? `${spec.piece ? spec.piece.toUpperCase() : ""}${spec.to ?? ""}` : move), reason);
+        }
+        if (preview) {
+          const m = new Chess(chess.fen()).move(resolution.san);
+          return ok({ speech: `${spokenMove(m)}?`, preview: true, san: m.san, spoken: spokenMove(m) });
         }
 
         // Earlier evaluations (user's side, after each of their moves) give swings, trends and "position changed".
@@ -254,10 +323,10 @@ export function createChessServer(deps: Deps): McpServer {
 
         // Evaluate before and after the user's move to judge it.
         const openingBefore = currentOpening(chess)?.name;
-        const before = await tryAnalyse(chess);
+        const before = await tryAnalyse(chess, game.startFen);
         const human = chess.move(resolution.san);
         const humanIdeas = moveIdeas(human, chess);
-        const after = await tryAnalyse(chess);
+        const after = await tryAnalyse(chess, game.startFen);
 
         let quality: MoveQuality | undefined;
         let lossCp: number | undefined;
@@ -280,6 +349,7 @@ export function createChessServer(deps: Deps): McpServer {
           quality,
           bestSan,
           opening: humanOpening && humanOpening !== openingBefore ? humanOpening : undefined,
+          lossCp,
         });
 
         let speech = `You played ${humanRec.spoken}.`;
@@ -477,17 +547,317 @@ export function createChessServer(deps: Deps): McpServer {
     "hint",
     {
       title: "Suggest a move",
-      description: "Ask the engine at full strength for the best move for the user. Does not play it.",
+      description:
+        "The engine's best move for the user at full strength, with the idea behind it. Does not play it. count: 1 (default, 'what should I play', 'any suggestion') up to 3 only when they ask for several ('my three best moves'). reveal: false for 'a small hint without giving it away' (names only the piece and the idea).",
+      inputSchema: z.object({
+        gameId: gameIdSchema,
+        count: z.number().int().min(1).max(3).default(1),
+        reveal: z.boolean().default(true),
+      }),
+      annotations: { readOnlyHint: true },
+    },
+    ({ gameId, count, reveal }) =>
+      guard(async () => {
+        const { game, chess } = await load(gameId);
+        if (game.status !== "active") throw new UserFacingError("The game is over, so there's nothing to suggest.");
+        if (chess.turn() !== game.humanColor) throw new UserFacingError("It's my move right now; ask again on your turn.");
+        const lines = await engine.top(chess.fen(), count, 500);
+        const options = lines.slice(0, count).map((l) => {
+          const c = new Chess(chess.fen());
+          const m = c.move(uciToObject(l.move));
+          return { san: m.san, spoken: spokenMove(m), piece: PIECE_NAMES[m.piece], from: m.from, flags: m.flags, ideas: moveIdeas(m, c), evaluation: evalForUser(l, chess.turn(), game.humanColor) };
+        });
+        if (options.length === 0) throw new UserFacingError("You have no legal moves.");
+        const best = options[0];
+        const idea = best.ideas[0] ? `: it ${best.ideas[0]}` : "";
+        let speech: string;
+        if (!reveal) {
+          // Where to look and why, never the square: "Look at your knight on the kingside: it can attack my queen."
+          const area = /^[a-c]/.test(best.from) ? "on the queenside" : /^[d-e]/.test(best.from) ? "in the centre" : "on the kingside";
+          const vague = best.ideas.map((i) => i.replace(/ on [a-h][1-8]/g, "").replace(/^attacks the/, "can attack my").replace(/^captures/, "can capture").replace(/^gives check/, "can give check").replace(/^develops the \w+/, "wants to come into play").replace(/^stakes a claim in the centre/, "can grab the centre")).find(Boolean);
+          const why = vague ?? (best.flags.includes("k") || best.flags.includes("q") ? "your king wants safety" : best.piece === "pawn" ? "it can gain space" : "it has a strong move");
+          speech = best.piece === "king" && (best.flags.includes("k") || best.flags.includes("q")) ? "Think about your king's safety." : `Look at your ${best.piece} ${area}: ${vague ? `it ${vague}` : why}.`;
+        } else if (count === 1) speech = `Try ${best.spoken}${idea}.`;
+        else speech = `Best is ${best.spoken}${idea}. Also good: ${options.slice(1).map((o) => o.spoken).join(", and ")}.`;
+        return ok({ speech, options: reveal ? options : [{ piece: best.piece, ideas: best.ideas.map((i) => i.replace(/ on [a-h][1-8]/g, "")) }], reveal });
+      }),
+  );
+
+  /** A side-to-move score as words and pawns from the user's point of view. */
+  function evalForUser(l: { scoreCp: number; mate?: number }, sideToMove: Color, user: Color): { says: string; pawns: number; mateIn?: number } {
+    const cp = sideToMove === user ? l.scoreCp : -l.scoreCp;
+    const mate = l.mate === undefined ? undefined : sideToMove === user ? l.mate : -l.mate;
+    if (mate !== undefined && mate !== 0) return { says: mate > 0 ? `you have a forced mate in ${mate}` : `I have a forced mate in ${-mate}`, pawns: Math.sign(mate) * 99, mateIn: mate };
+    const a = Math.abs(cp);
+    const who = cp > 0 ? "you're" : "I'm";
+    const says = a < 40 ? "roughly equal" : a < 120 ? `${who} slightly better` : a < 300 ? `${who} clearly better` : `${who} winning`;
+    return { says, pawns: Math.round(cp) / 100 };
+  }
+
+  const mine = (c: Color, user: Color) => (c === user ? "your" : "my");
+
+  server.registerTool(
+    "analyze_position",
+    {
+      title: "Analyse the position",
+      description:
+        "Everything about the current position from the user's side, for any question about it: evaluation (who is better, by how much, forced mates), the best moves (top 3), what I (the opponent) am threatening, pieces under attack or undefended on both sides, pins, forks and other tactics available, checks, material and pieces lost, castling rights, king safety, development, centre, pawn structure (isolated, doubled, passed), open files, the most active pieces, the game phase and opening, and the last moves with their quality. Answer only what was asked from these facts.",
       inputSchema: z.object({ gameId: gameIdSchema }),
       annotations: { readOnlyHint: true },
     },
     ({ gameId }) =>
       guard(async () => {
+        const { game, moves, chess } = await load(gameId);
+        const user = game.humanColor;
+        const me = other(user);
+        const yourTurn = chess.turn() === user;
+        const over = statusOf(chess).status !== "active" || game.status !== "active";
+        const lines = over ? [] : await engine.top(chess.fen(), 3, 500);
+        const evaluation = lines[0] ? evalForUser(lines[0], chess.turn(), user) : undefined;
+        const spoken = (fen: string, uci: string) => {
+          const c = new Chess(fen);
+          const m = c.move(uciToObject(uci));
+          return { move: spokenMove(m), san: m.san, ideas: moveIdeas(m, c) };
+        };
+        /** The engine's principal variation, spoken: the only move sequences the assistant may describe. */
+        const line = (fen: string, pv: string[], plies = 4) => {
+          const c = new Chess(fen);
+          const out: string[] = [];
+          for (const uci of pv.slice(0, plies)) {
+            try {
+              const m = c.move(uciToObject(uci));
+              out.push(`${m.color === user ? "you" : "I"} ${spokenMove(m)}`);
+            } catch {
+              break;
+            }
+          }
+          return out.join(", then ");
+        };
+        const bestMoves = yourTurn
+          ? lines.map((l) => ({ ...spoken(chess.fen(), l.move), evaluation: evalForUser(l, chess.turn(), user).says, line: line(chess.fen(), l.pv) }))
+          : [];
+        // My threat: what I would play if it were my move now (a null move), and how much it would hurt.
+        let threat: Record<string, unknown> | undefined;
+        if (yourTurn && !over) {
+          const nullFen = nullMoveFen(chess);
+          const t = nullFen ? (await engine.top(nullFen, 1, 400))[0] : undefined;
+          if (t && nullFen) {
+            const ifIgnored = evalForUser(t, me, user);
+            const s = spoken(nullFen, t.move);
+            const serious = (t.mate !== undefined && t.mate > 0) || (evaluation && evaluation.pawns - ifIgnored.pawns >= 1.5);
+            threat = { myBestMoveIfIgnored: s.move, whatItDoes: s.ideas, positionIfYouIgnoreIt: ifIgnored.says, serious: !!serious, line: line(nullFen, t.pv, 3), note: "This is only what happens if you ignore it; the evaluation above assumes you deal with it." };
+          }
+        }
+        const lastHuman = [...moves].reverse().find((m) => m.by === "human");
+        const lastEngine = [...moves].reverse().find((m) => m.by === "engine");
+        let myLastIdeas: string[] = [];
+        if (lastEngine) {
+          const c = replay(moves.filter((m) => m.ply < lastEngine.ply).map((m) => m.uci), game.startFen);
+          const m = c.move(uciToObject(lastEngine.uci));
+          myLastIdeas = moveIdeas(m, c);
+        }
+        const tactics = yourTurn ? { ...shots(chess), forks: forks(new Chess(chess.fen())) } : undefined;
+        // In check, every legal move is a way out: list them by kind, so "can my king escape?" is never guessed.
+        let waysOutOfCheck: Record<string, string[]> | undefined;
+        if (yourTurn && chess.inCheck()) {
+          const legal = chess.moves({ verbose: true });
+          const checkers = chess.attackers(chess.board().flat().find((p) => p?.type === "k" && p.color === user)!.square, me);
+          waysOutOfCheck = {
+            kingMoves: legal.filter((m) => m.piece === "k").map((m) => spokenMove(m)),
+            captureTheChecker: legal.filter((m) => m.piece !== "k" && checkers.includes(m.to)).map((m) => spokenMove(m)),
+            blocks: legal.filter((m) => m.piece !== "k" && !checkers.includes(m.to)).map((m) => spokenMove(m)),
+            checkedBy: checkers.map((s) => `my ${PIECE_NAMES[chess.get(s)!.type]} on ${s}`),
+          };
+        }
+        const mat = material(chess);
+        const balance = materialBalance(chess, user);
+        const facts = {
+          moveNumber: chess.moveNumber(),
+          toMove: yourTurn ? "you" : "me",
+          phase: phase(chess),
+          opening: currentOpening(chess)?.name,
+          gameOver: over ? spokenGameOver(chess, user) ?? game.status : undefined,
+          youAreInCheck: yourTurn && chess.inCheck(),
+          waysOutOfCheck,
+          legalMoveCount: yourTurn ? chess.moves().length : undefined,
+          evaluation,
+          bestMoves,
+          threat,
+          material: { balance: spokenMaterial(balance), you: user === "w" ? mat.white : mat.black, me: user === "w" ? mat.black : mat.white, youLost: lostPieces(chess, user), iLost: lostPieces(chess, me) },
+          yourPiecesUnderAttack: hangingPieces(chess, user).map((h) => `${PIECE_NAMES[h.piece]} on ${h.square} (attacked by my ${PIECE_NAMES[h.attackedBy]})`),
+          myPiecesYouCanWin: hangingPieces(chess, me).map((h) => `${PIECE_NAMES[h.piece]} on ${h.square} (attacked by your ${PIECE_NAMES[h.attackedBy]})`),
+          pins: { yourPinnedPieces: pins(chess, user), myPinnedPieces: pins(chess, me) },
+          tactics,
+          castling: { kingside: castleWhy(chess, user, "k") ?? "you can castle kingside", queenside: castleWhy(chess, user, "q") ?? "you can castle queenside" },
+          kingSafety: { you: kingSafety(chess, user).summary, me: kingSafety(chess, me).summary },
+          development: { you: development(chess, user), me: development(chess, me) },
+          centre: centre(chess).summary,
+          pawns: { you: pawnStructure(chess, user), me: pawnStructure(chess, me) },
+          // Where everything is, so no answer has to guess a square ("my queen on d1" was the user's queen).
+          pieces: { yours: spokenPieceList(piecesOf(chess, user)), mine: spokenPieceList(piecesOf(chess, me)) },
+          files: openFiles(chess),
+          yourRooks: piecesOf(chess, user).filter((p) => p.type === "r").map((p) => {
+            const f = p.square[0];
+            const pawnsOn = piecesOf(chess, user).concat(piecesOf(chess, me)).filter((x) => x.type === "p" && x.square[0] === f);
+            const ownPawn = pawnsOn.some((x) => piecesOf(chess, user).some((y) => y.square === x.square));
+            return `rook on ${p.square}: ${pawnsOn.length === 0 ? "open file" : ownPawn ? "closed file (your own pawn is on it)" : "half-open file"}`;
+          }),
+          activity: { you: activity(chess, user), me: activity(chess, me) },
+          // "Is my rook trapped?": pieces (not pawns) that have no legal move right now.
+          yourPiecesWithNoMoves: yourTurn
+            ? piecesOf(chess, user).filter((p) => p.type !== "p" && chess.moves({ square: p.square }).length === 0).map((p) => `${PIECE_NAMES[p.type]} on ${p.square}`)
+            : undefined,
+          squaresControlled: { you: control(chess, user), me: control(chess, me) },
+          lastMoves: {
+            yours: lastHuman ? { move: lastHuman.spoken, moveNumber: lastHuman.moveNumber, quality: lastHuman.quality, betterWas: lastHuman.bestSan } : undefined,
+            mine: lastEngine ? { move: lastEngine.spoken, moveNumber: lastEngine.moveNumber, ideas: myLastIdeas } : undefined,
+          },
+        };
+        const speech = [
+          evaluation ? `Position: ${evaluation.says}.` : "",
+          threat?.serious ? `I'm threatening ${threat.myBestMoveIfIgnored}.` : "",
+          bestMoves[0] ? `Best for you is ${bestMoves[0].move}.` : "",
+        ].filter(Boolean).join(" ") || "Here's the position.";
+        return ok({ speech, ...facts });
+      }),
+  );
+
+  server.registerTool(
+    "consider_move",
+    {
+      title: "What if / can I play this move?",
+      description:
+        "Check a move without playing it: whether it's legal (and if not, exactly why: blocked, pinned, in check, castling rights, attacked square...), and if legal how good it is, what it does, whether it hangs anything, and my best reply. For 'can I move my king to e2', 'can I castle', 'is bishop takes f7 safe', 'what happens if I take that pawn', 'how would you respond to knight g5'.",
+      inputSchema: z.object({
+        gameId: gameIdSchema,
+        move: z.string().min(1).describe("The move: SAN (Nf3, O-O) or the user's words ('king to e2')."),
+      }),
+      annotations: { readOnlyHint: true },
+    },
+    ({ gameId, move }) =>
+      guard(async () => {
         const { game, chess } = await load(gameId);
-        if (game.status !== "active") throw new UserFacingError("The game is over, so there's nothing to suggest.");
-        const uci = await engine.best(chess.history({ verbose: true }).map((m) => moveToUci(m)));
-        const move = new Chess(chess.fen()).move(uciToObject(uci));
-        return ok({ speech: `You could try ${spokenMove(move)}.`, san: move.san });
+        const user = game.humanColor;
+        const c = chess.turn() === user ? new Chess(chess.fen()) : null;
+        if (!c) throw new UserFacingError("It's my move right now; ask again on your turn.");
+        // "What happens if I move my queen?": a piece but no square. Say where it can go and ask which.
+        const LETTER: Record<string, string> = { k: "king", q: "queen", r: "rook", b: "bishop", n: "knight", p: "pawn" };
+        const san = /^([KQRBN])([a-h][1-8])$/.exec(move.trim()); // the model sometimes passes the piece's own square ("Qe7")
+        const spec0 = readSpecs(move)[0];
+        const named = /\b(king|queen|rook|bishop|knight|pawn)s?\b/i.exec(move)?.[1]?.toLowerCase();
+        const pieceOnly =
+          (named && !/\b[a-h]\s?[1-8]\b|castl/i.test(move) && !spec0) ||
+          (san && c.get(san[2] as Square)?.type === san[1].toLowerCase() && c.get(san[2] as Square)?.color === user);
+        if (pieceOnly) {
+          const lm = legalMovesSpoken(c, { piece: named ?? LETTER[san![1].toLowerCase()] });
+          return ok({ speech: lm.moves.length ? `${lm.speech} Which square do you have in mind?` : lm.speech, legal: "which square", moves: lm.moves });
+        }
+        const res = resolveSpokenMove(c, move, [move]);
+        if (res.kind !== "move") {
+          const spec = readSpecs(move)[0];
+          const reason = spec ? explainIllegal(c, user, { to: spec.to, piece: spec.piece, from: spec.from, castle: spec.castle, capture: spec.capture }) : undefined;
+          // "Did you mean…" only when the words were unclear; an illegal move gets its reason (and the nearest legal one).
+          if (res.kind === "confirm" && !(res.reason === "illegal" && reason)) return ok({ speech: confirmQuestion(c, res), legal: "unclear", candidates: res.candidates });
+          const nearest = res.kind === "confirm" ? res.candidates.map((san) => spokenMove(new Chess(c.fen()).move(san))) : [];
+          return ok({ speech: reason ? `No: ${reason}.` : "That isn't a legal move here.", legal: false, reason, nearestLegal: nearest });
+        }
+        const before = await engine.top(c.fen(), 1, 400);
+        const m = c.move(res.san);
+        const ideas = moveIdeas(m, c);
+        const after = c.isGameOver() ? [] : await engine.top(c.fen(), 1, 400);
+        const nowEval = before[0] ? evalForUser(before[0], user, user) : undefined;
+        const afterEval = after[0] ? evalForUser(after[0], other(user), user) : c.isCheckmate() ? { says: "checkmate, you win", pawns: 99 } : { says: "a draw", pawns: 0 };
+        const loss = nowEval ? Math.max(0, Math.round((nowEval.pawns - afterEval.pawns) * 100)) : undefined;
+        const quality = loss === undefined ? undefined : loss <= 15 ? "best or as good" : loss <= 60 ? "good" : loss <= 120 ? "inaccuracy" : loss <= 300 ? "mistake" : "blunder";
+        let myReply: string | undefined;
+        if (after[0]) {
+          const r = new Chess(c.fen()).move(uciToObject(after[0].move));
+          myReply = spokenMove(r);
+        }
+        const hangs = hangingPieces(c, user).map((h) => `${PIECE_NAMES[h.piece]} on ${h.square}`);
+        const verdict = !quality ? "" : quality === "best or as good" ? ", and it's a strong move" : quality === "good" ? ", and it's fine" : `, but it would be a ${quality}`;
+        const speech = `Yes, ${spokenMove(m)} is legal${verdict}.${myReply ? ` I'd answer ${myReply}.` : ""}${hangs.length && quality !== "best or as good" ? ` It would leave your ${hangs[0]} hanging.` : ""}`;
+        return ok({ speech, legal: true, move: spokenMove(m), san: m.san, whatItDoes: ideas, quality, evaluationAfter: afterEval.says, comparedWithBest: nowEval?.says, leavesHanging: hangs, myBestReply: myReply });
+      }),
+  );
+
+  server.registerTool(
+    "review_game",
+    {
+      title: "Review the game",
+      description:
+        "How the user has played so far (or in the finished game): each of their mistakes and blunders with move number and the better move, the first mistake, the biggest blunder, how many moves were best or good, the openings reached, and the ideas behind my last move. For 'did I mess up', 'was my last move good', 'where did I go wrong', 'what was my biggest blunder', 'why did you play that', 'analyse the game'.",
+      inputSchema: z.object({ gameId: gameIdSchema }),
+      annotations: { readOnlyHint: true },
+    },
+    ({ gameId }) =>
+      guard(async () => {
+        const { game, moves } = await load(gameId);
+        const human = moves.filter((m) => m.by === "human");
+        const fenBefore = (ply: number) => (ply <= 1 ? game.startFen ?? new Chess().fen() : moves.find((x) => x.ply === ply - 1)?.fenAfter ?? new Chess().fen());
+        const better = (m: MoveRecord) => {
+          if (!m.bestSan) return undefined;
+          try {
+            return spokenMove(new Chess(fenBefore(m.ply)).move(m.bestSan));
+          } catch {
+            return undefined;
+          }
+        };
+        const bad = human.filter((m) => m.quality === "mistake" || m.quality === "blunder" || m.quality === "inaccuracy");
+        const errors = bad.map((m) => ({ moveNumber: m.moveNumber, move: m.spoken, quality: m.quality, betterWas: better(m), lostPawns: m.lossCp !== undefined ? m.lossCp / 100 : undefined }));
+        const rank = { blunder: 3, mistake: 2, inaccuracy: 1 } as Record<string, number>;
+        const biggest = [...errors].sort((a, b) => (b.lostPawns ?? rank[b.quality!]) - (a.lostPawns ?? rank[a.quality!]))[0];
+        const rated = human.filter((m) => m.quality);
+        const goodShare = rated.length ? Math.round((100 * rated.filter((m) => m.quality === "best" || m.quality === "good").length) / rated.length) : undefined;
+        const lastHuman = human[human.length - 1];
+        const lastEngine = [...moves].reverse().find((m) => m.by === "engine");
+        let myLastIdeas: string[] = [];
+        if (lastEngine) {
+          const c = replay(moves.filter((m) => m.ply < lastEngine.ply).map((m) => m.uci), game.startFen);
+          const mv = c.move(uciToObject(lastEngine.uci));
+          myLastIdeas = moveIdeas(mv, c);
+        }
+        const speech = human.length === 0
+          ? "You haven't played a move yet."
+          : errors.length === 0
+            ? `No mistakes so far: ${rated.length ? `${goodShare}% of your moves were best or good` : "nothing to flag"}.`
+            : `${errors.length} slip${errors.length === 1 ? "" : "s"} so far. The biggest was move ${biggest.moveNumber}, ${biggest.move}${biggest.betterWas ? `; ${biggest.betterWas} was better` : ""}.`;
+        return ok({
+          speech,
+          yourMovesPlayed: human.length,
+          bestOrGoodPercent: goodShare,
+          mistakes: errors,
+          firstMistake: errors[0],
+          biggestMistake: biggest,
+          yourLastMove: lastHuman ? { moveNumber: lastHuman.moveNumber, move: lastHuman.spoken, quality: lastHuman.quality, betterWas: lastHuman.quality && lastHuman.quality !== "best" && lastHuman.quality !== "good" ? better(lastHuman) : undefined } : undefined,
+          myLastMove: lastEngine ? { moveNumber: lastEngine.moveNumber, move: lastEngine.spoken, ideas: myLastIdeas } : undefined,
+          openings: moves.filter((m) => m.opening).map((m) => m.opening),
+          status: game.status,
+          result: game.result,
+        });
+      }),
+  );
+
+  server.registerTool(
+    "offer_draw",
+    {
+      title: "Offer a draw",
+      description: "The user offers a draw. I accept only when the position is level (or I'm worse) and we're past the opening.",
+      inputSchema: z.object({ gameId: gameIdSchema }),
+      annotations: { destructiveHint: true },
+    },
+    ({ gameId }) =>
+      guard(async () => {
+        const { game, chess } = await load(gameId);
+        if (game.status !== "active") throw new UserFacingError("That game is already over.");
+        const l = (await engine.top(chess.fen(), 1, 400))[0];
+        const forMe = l ? evalForUser(l, chess.turn(), other(game.humanColor)).pawns : 0;
+        const accept = chess.history().length >= 20 ? forMe <= 0.3 : forMe <= -1;
+        if (!accept) {
+          return ok({ speech: forMe > 0.3 ? "No thanks, I like my position. Let's play on!" : "It's a bit early for a draw. Let's play on!", accepted: false });
+        }
+        await store.updateGame(gameId, { status: "draw", result: "1/2-1/2", reason: "agreement", updatedAt: now() });
+        return ok({ speech: "I accept. The game is a draw by agreement. Good game!", accepted: true, result: "1/2-1/2", gameOver: true });
       }),
   );
 

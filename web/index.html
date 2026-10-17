@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Alexa Chess</title>
-  <meta name="description" content="Play blind chess by voice with a simulated Alexa+ speaker. Say “Alexa” to talk.">
+  <meta name="description" content="Play blind chess by voice with a simulated Alexa+ speaker. Just talk: no wake word needed.">
   <link rel="stylesheet" href="styles.css">
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Ccircle cx='32' cy='32' r='26' fill='%23111827' stroke='%2300caff' stroke-width='8'/%3E%3C/svg%3E">
 </head>
@@ -22,8 +22,8 @@
   <div id="start" class="start" role="dialog" aria-modal="true" aria-labelledby="start-title">
     <div class="start-card">
       <h1 id="start-title">Alexa Chess</h1>
-      <p>Blind chess by voice. After you tap, just say <strong>“Alexa, let’s play chess.”</strong></p>
-      <button id="start-btn" class="start-btn">Tap to wake</button>
+      <p>Blind chess by voice, like a conversation. After you tap, just talk: <strong>“Let’s play chess.”</strong> No wake word needed. Tap the speaker to interrupt her, or say “pause” to stop listening.</p>
+      <button id="start-btn" class="start-btn">Tap to start</button>
       <p class="small" id="start-note">Works best in Chrome or Edge with a microphone.</p>
     </div>
   </div>
@@ -51,6 +51,9 @@
   </aside>
 
   <script src="wake.js"></script>
+  <script src="eventstream.js"></script>
+  <script src="transcribe.js"></script>
+  <script src="debugscreen.js"></script>
   <script src="vosk.js"></script>
   <script src="app.js"></script>
 </body>

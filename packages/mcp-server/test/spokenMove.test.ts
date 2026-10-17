@@ -1,6 +1,6 @@
 import { Chess } from "chess.js";
 import { describe, expect, it } from "vitest";
-import { confirmQuestion, resolveSpokenMove, soundKey, tokenize, toSpec } from "../src/chess/spokenMove.js";
+import { confirmQuestion, resolveSpokenMove, soundKey, tokenize, toSpec, accentVariants } from "../src/chess/spokenMove.js";
 
 const after = (...sans: string[]) => {
   const c = new Chess();
@@ -89,8 +89,16 @@ describe("en-IN mishearings", () => {
     ["pondy 4", "d4"],
     ["pondi four", "d4"],
     ["pondi e4", "e4"],
+    ["Tawny for", "e4"], // Polly Joanna (US) through Transcribe
+    ["Poorly for.", "e4"], // Polly Brian (UK)
     ["night free", "Nf3"],
     ["nighty f3", "Nf3"],
+    // Amazon Transcribe en-IN, from the Polly end-to-end test (scripts/test-transcribe.mjs)
+    ["24", "d4"],
+    ["24.", "d4"],
+    ["twenty four", "d4"],
+    ["Swansea 4", "c4"],
+    ["worn to D4.", "d4"],
   ])("start position: %s -> %s", (said, san) => {
     expect(heard(new Chess(), said)).toMatchObject({ kind: "move", san, via: "spoken" });
   });
@@ -243,5 +251,107 @@ describe("the assistant's own reading", () => {
       try { new Chess(c.fen()).move(s); return true; } catch { return false; }
     }), heard: "night e tree", reason: "ambiguous" });
     expect(q).toMatch(/^I heard "night e tree"\. Did you mean knight from/);
+  });
+});
+
+describe("plays straight away instead of asking", () => {
+  it.each([
+    ["pawn to echo four", "e4"],
+    ["pawn to delta 4", "d4"],
+    ["pawn to alpha four", "a4"],
+    ["knight to foxtrot three", "Nf3"],
+    ["pawn to hotel three", "h3"],
+  ])("radio alphabet: %s -> %s", (said, san) => {
+    expect(heard(new Chess(), said)).toMatchObject({ kind: "move", san, via: "spoken" });
+  });
+
+  it("radio alphabet in a capture", () => {
+    expect(heard(after("e4", "d5"), "echo takes delta five")).toMatchObject({ kind: "move", san: "exd5" });
+  });
+
+  // 1.d4 d5 2.Nf3 Nf6: knights on b1 and f3 can both reach d2.
+  it.each([
+    ["knight b d2", "Nbd2"],
+    ["knight bravo d2", "Nbd2"],
+    ["knight f d2", "Nfd2"],
+    ["knight to d2 of b", "Nbd2"],
+    ["I said move knight to D2 of B", "Nbd2"],
+    ["knight to d2 from f", "Nfd2"],
+    ["knight to d2 from the f file", "Nfd2"],
+  ])("the file the piece comes from: %s -> %s", (said, san) => {
+    expect(heard(after("d4", "d5", "Nf3", "Nf6"), said)).toMatchObject({ kind: "move", san });
+  });
+
+  it("'the c pawn takes d5' picks that pawn", () => {
+    expect(heard(after("c4", "d5", "e4", "e6"), "the c pawn takes d5")).toMatchObject({ kind: "move", san: "cxd5" });
+    expect(heard(after("c4", "d5", "e4", "e6"), "the e pawn takes d5")).toMatchObject({ kind: "move", san: "exd5" });
+  });
+
+  it("'move a pawn to e4' is not the a-file", () => {
+    expect(heard(new Chess(), "move a pawn to e4")).toMatchObject({ kind: "move", san: "e4" });
+  });
+
+  it("a lower alternative can't outvote the best transcript", () => {
+    expect(heard(new Chess(), "knight f3", "knight c3", "night c3")).toMatchObject({ kind: "move", san: "Nf3" });
+  });
+});
+
+describe("castling", () => {
+  const both = () => new Chess("r3k2r/8/8/8/8/8/8/R3K2R w KQkq - 0 1");
+
+  it.each([["castle on the queen's side"], ["castle on the queens side"], ["castle queen side"]])("%s is queenside", (said) => {
+    expect(heard(both(), said)).toMatchObject({ kind: "move", san: "O-O-O" });
+  });
+
+  it("'castle on the king's side' is kingside", () => {
+    expect(heard(both(), "castle on the king's side")).toMatchObject({ kind: "move", san: "O-O" });
+  });
+
+  it("a bare 'castle' asks which way when both are legal", () => {
+    const c = both();
+    const r = heard(c, "castle");
+    expect(r).toMatchObject({ kind: "confirm", candidates: ["O-O", "O-O-O"] });
+    if (r.kind === "confirm") expect(confirmQuestion(c, r)).toBe("Castle which way: kingside, or queenside?");
+  });
+
+  it("a bare 'castle' plays the only legal castle", () => {
+    expect(heard(after("e4", "e5", "Nf3", "Nc6", "Bc4", "Nf6"), "castle")).toMatchObject({ kind: "move", san: "O-O" });
+  });
+});
+
+describe("accents: sound-alike letters and numbers (live site, 2026-10-16)", () => {
+  const capture = () => new Chess("rnbqkbnr/ppp2ppp/4p3/3P4/8/8/PPP1PPPP/RNBQKBNR w KQkq - 0 3"); // d5 pawn can take e6
+
+  it.each([
+    ["pawn takes a 6", ["dxe6"]],
+    ["takes sex", ["dxe6"]],
+  ])("asks about the legal reading of %s", (said, candidates) => {
+    expect(resolveSpokenMove(capture(), undefined, [said])).toMatchObject({ kind: "confirm", candidates });
+  });
+
+  it("a spelled letter is one letter, never a rank: e for elephant", () => {
+    expect(resolveSpokenMove(capture(), undefined, ["pawn takes e for elephant 6"])).toMatchObject({ kind: "move", san: "dxe6" });
+  });
+
+  it.each([
+    ["night S3", "Nf3"],
+    ["knight foxtrot three", "Nf3"],
+    ["pawn delta 4", "d4"],
+  ])("start position: %s -> offers %s", (said, san) => {
+    const r = resolveSpokenMove(new Chess(), undefined, [said]);
+    const offered = r.kind === "move" ? [r.san] : r.kind === "confirm" ? r.candidates : [];
+    expect(offered).toContain(san);
+  });
+
+  it("still says no when nothing legal sounds like it (1.d4 e6: pawn takes e6)", () => {
+    const c = new Chess("rnbqkbnr/pppp1ppp/4p3/8/3P4/8/PPP1PPPP/RNBQKBNR w KQkq - 0 2");
+    expect(resolveSpokenMove(c, undefined, ["pawn takes e6"]).kind).toBe("none");
+  });
+
+  it("makes variants for spelled letters, rank words and confusable files", () => {
+    expect(accentVariants("pawn takes a 6")).toContain("pawn takes e 6");
+    expect(accentVariants("takes sex")).toContain("takes six");
+    expect(accentVariants("E6 elephant 6")).toContain("e6 e 6");
+    expect(accentVariants("knight S3")).toEqual(expect.arrayContaining(["knight f3", "knight c3"]));
   });
 });

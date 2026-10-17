@@ -1,5 +1,5 @@
 import { Chess, type Color, type Move, type PieceSymbol, type Square } from "chess.js";
-import { PIECE_NAMES, colorName, joinAnd, spokenMove, spokenPieceList, spokenSquare } from "./spoken.js";
+import { PIECE_NAMES, PIECE_PLURALS, colorName, joinAnd, spokenMove, spokenPieceList, spokenSquare } from "./spoken.js";
 
 export type GameStatus = "active" | "checkmate" | "stalemate" | "draw" | "resigned";
 export type GameResult = "1-0" | "0-1" | "1/2-1/2";
@@ -13,8 +13,8 @@ const PIECE_WORDS: Record<string, PieceSymbol> = {
 const PIECE_VALUES: Record<PieceSymbol, number> = { p: 1, n: 3, b: 3, r: 5, q: 9, k: 0 };
 
 /** Rebuilds a position by replaying moves (UCI strings) so repetition/50-move draws are detected correctly. */
-export function replay(uciMoves: string[]): Chess {
-  const chess = new Chess();
+export function replay(uciMoves: string[], startFen?: string): Chess {
+  const chess = new Chess(startFen);
   for (const uci of uciMoves) {
     chess.move(uciToObject(uci));
   }
@@ -28,7 +28,8 @@ export function uciToObject(uci: string): { from: string; to: string; promotion?
 export const moveToUci = (m: Move): string => `${m.from}${m.to}${m.promotion ?? ""}`;
 
 export class IllegalMoveError extends Error {
-  constructor(message: string, readonly suggestions: string[]) {
+  /** `reason`: why it can't be played, in plain words ("your bishop on c1 is blocked by your pawn on d2"). */
+  constructor(message: string, readonly suggestions: string[], readonly reason?: string) {
     super(message);
   }
 }
@@ -99,7 +100,7 @@ export function suggestMoves(chess: Chess, raw: string): string[] {
     pool = legal.filter(f);
     if (pool.length) break;
   }
-  if (pool.length === 0) pool = legal;
+  // Nothing related (no piece or square heard): random legal moves ("pawn to a3 or a4") only confuse.
   return pool.slice(0, 6).map((m) => `${m.san} (${spokenMove(m)})`);
 }
 
@@ -166,7 +167,8 @@ export function legalMovesSpoken(chess: Chess, opts: { square?: string; piece?: 
   } else if (opts.piece) {
     const type = PIECE_WORDS[opts.piece.toLowerCase()] ?? (opts.piece.toLowerCase() as PieceSymbol);
     moves = moves.filter((m) => m.piece === type);
-    subject = `Your ${PIECE_NAMES[type] ?? opts.piece}s`;
+    const count = chess.board().flat().filter((p) => p && p.color === chess.turn() && p.type === type).length;
+    subject = count === 1 ? `Your ${PIECE_NAMES[type] ?? opts.piece}` : `Your ${PIECE_PLURALS[type] ?? `${opts.piece}s`}`;
   }
   if (moves.length === 0) return { speech: `${subject} can't move right now.`, moves: [] };
   const list = moves.map((m) => spokenMove(m));

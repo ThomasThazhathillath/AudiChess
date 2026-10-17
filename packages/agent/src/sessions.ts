@@ -24,6 +24,8 @@ export interface Session {
   voice?: string;
   /** Speaking rate as a percentage, 100 = normal. */
   rate?: number;
+  /** Repeat each move back and play it only after a yes. */
+  confirmMoves?: boolean;
   turns: Turn[];
   updatedAt: string;
   expiresAt: number;

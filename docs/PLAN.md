@@ -418,3 +418,212 @@ Findings from a 96-turn live game: Chrome (en-IN) almost never heard "rook" (roc
   - Forced early finals were removed: they cut "Alexa … let's play chess" in two.
 - Agent: `ask_again` must not brush off game questions; board questions go to the board tools. A "Your move, please" closer is stripped. The skill notes Hindi filler ("aur", "haan").
 - Open: an answer to "are you going to take my pawn?" claimed d4 could take d5. It was board reasoning beyond the tool facts, worth a look in coach mode.
+
+## Phase 6 — Amazon Transcribe streaming ears (2026-10-16)
+
+Why: Chrome's free recognizer was the weak link. Its en-IN service returned no words for hours, it misheard chess ("porn" for pawn, "93" for knight f3), and it offers no tuning. The Echo page now listens with **Amazon Transcribe streaming** in ap-south-1. The experience is unchanged: one tap, "Alexa" wake word, conversation mode (wake.js `decide()`/`followUpMs()` untouched), half-duplex, and the debug drawer with its persistent log.
+
+### Architecture
+```
+mic (echo cancellation, noise suppression, auto gain)
+  -> AudioWorklet web/pcm-worklet.js (16 kHz mono s16le, 100 ms chunks; the AudioContext runs at 16 kHz)
+  -> web/eventstream.js (AWS event-stream frames, CRC32)  -> one WebSocket, kept open while listening
+  -> wss://transcribestreaming.ap-south-1.amazonaws.com:8443 (SigV4-presigned URL)
+  <- partials + finals -> web/transcribe.js -> app.js -> wake.js gate -> agent POST (unchanged)
+page --POST {sessionId}--> alexa_chess_transcribe_url (Lambda Function URL) -> presigned URL (300 s)
+```
+- **No credentials in the browser.** `packages/transcribe-url` (Node 22, arm64, esbuild) signs the URL with `@smithy/signature-v4` and `@aws-crypto/sha256-js`. Its role can only call `transcribe:StartStreamTranscriptionWebSocket`. It requires a sessionId, uses the same CORS origin lock as the agent, and logs every issued or denied URL as JSON. **TODO:** real rate limiting (per-session/IP counters in DynamoDB, or CloudFront + WAF) before wider use.
+- **URL expiry only gates the handshake**, so an open stream keeps working past 300 s. Every (re)connect uses a fresh URL, and the page prefetches one so a reconnect costs ~150 ms. Reconnects use backoff from 0.5 s to 8 s with jitter. Up to 3 s of speech captured during a reconnect is sent once the socket opens. A stalled socket (5 s of unsent audio) is replaced.
+- **Half-duplex:** while Alexa speaks, and for 400 ms after (room echo), the page sends **silence frames** instead of the mic. Transcribe never hears her, and the stream doesn't hit the ~15 s idle timeout. Mute closes the stream, so nothing is sent or billed.
+- **Alternatives:** Transcribe streaming returns one alternative per segment, so `alternatives` = the final plus the partials that differed from it (pure prefixes dropped).
+- **Fallback:** `?stt=chrome` runs the old Chrome recognizer path unchanged. The page also switches to it by itself after 3 failed URL fetches. Vosk stays off (`?ears=1`). A/B switches: `?lang=multi`, `?stability=off|low|medium|high`.
+- **Local stack:** the local agent (`packages/agent/scripts/dev-server.ts`) also serves `POST /transcribe-url` with the same handler, signed with your local AWS credentials. `serve-web.mjs` puts `transcribeUrl` in config.json. `.claude/launch.json` adds `mcp-alt`/`agent-alt`/`web-alt` (ports 3011/3012/5183) next to the original three.
+
+### Custom vocabulary
+- `infra/transcribe/vocabulary.txt`, generated and validated by `node scripts/build-vocabulary.mjs` (`--check`). It has 495 phrases: Alexa, pieces, chess verbs, difficulty and colour words, Hinglish fillers (aur, haan, …), the 64 squares (`e-four` → DisplayAs `e4`), and every piece+square (`pawn-d-four` → `pawn d4`).
+- Transcribe has dropped SoundsLike/IPA, so those columns stay empty. Phrases can't contain digits.
+- CloudFormation has no resource for vocabularies. `.\scripts\deploy.ps1` uploads the file to `alexa-chess-cloudformation-bucket` and runs create-vocabulary or update-vocabulary for `alexa_chess_vocabulary` (en-IN), waiting for READY. `-VocabularyOnly` does just that step. Created 2026-10-16.
+
+### Choosing the settings: Polly end-to-end test (`node scripts/test-transcribe.mjs --compare`)
+Kajal (en-IN) speaks 15 commands, including Hinglish (SSML hi-IN "और") and two with 25% noise. They stream through the real presign handler and codec. Moves are judged by the chess server's own resolver in a position where they're legal.
+
+| config | raw transcripts right | moves/commands resolved (required 12) | latency after speech |
+|---|---|---|---|
+| **en-IN + vocabulary + stability high (default)** | 12/15 | **12/12** (+2/3 extra) | ~0.5–0.7 s |
+| en-IN, no vocabulary | 9/15 ("Queen Queen Dikes D5", "E4" for pawn e4) | 12/12 | ~0.5–0.7 s |
+| stability off | 10/15 | 12/12 (+3/3) | ~0.5–0.7 s |
+| multi-language en-IN + hi-IN | 9/15 | 12/12 | **~3 s** |
+
+- Decision: single en-IN + vocabulary + stability high. Multi-language identification added ~2.5 s per turn with no accuracy gain, and every segment came back as en-IN anyway ("aur" → "Or", which the agent ignores).
+- Transcribe en-IN writes a quick "pawn dee four" as **"24"** and "pawn see four" as **"Swansea 4"**. `spokenMove.ts` now reads a bare `2N` as pawn dN, plus `twenty`/`swansea`/`worn`. The agent's `looksLikeMove` treats a bare "24" as a move, so `make_move` is forced.
+- Still a miss: "Alexa, haan, knight to f3" → "ha na to F3" → f3. A Hindi word in the middle of a command can swallow the piece name.
+
+### Browser dry run (fake mic = Polly clips, real page, real agent and Bedrock)
+Background chatter was ignored without the wake word. Then:
+1. "Alexa, let's play chess" → heard ~2 s after speech started.
+2. "white, easy" (no wake word) → `new_game`.
+3. "pawn d4" (heard "24") → d4.
+4. "knight f3" → Nf3.
+
+The stream connected in ~150 ms. That run found and fixed one bug: `looksLikeMove("24", "2")` was false because it tested the alternatives joined together.
+
+### Cost (ap-south-1 list price, checked 2026-10-16)
+- Transcribe streaming: **$0.0001667 per second = $0.01 per minute = $0.60 per hour** of audio sent, billed per second with no minimum. Custom vocabulary and language identification add nothing.
+- The stream is open whenever the page is listening (silence while Alexa talks is billed too): **≈ $0.25 for a 25-minute game**, ≈ $0.40 for 40 minutes. The presign Lambda costs fractions of a cent.
+- Per game, all in: Transcribe ~$0.25 + Nova 2 Lite ~$0.06 + Polly ~$0.10–0.15 ≈ **$0.40–0.45**.
+- Optimise later: close the stream after the follow-up window ends with no game, and open it again on a local wake-word or VAD trigger. Or stop sending silence while Alexa speaks and reconnect instead (costs ~150 ms per turn).
+
+### Tests
+`node scripts/test-eventstream.mjs` (codec, including a real AWS frame from the docs), `npm test` in `packages/transcribe-url` (the signature matches an independent implementation of the documented steps; handler guards), `node scripts/build-vocabulary.mjs --check`, `node scripts/test-wake.mjs`, both existing vitest suites, `node scripts/test-transcribe.mjs` (needs AWS).
+
+### Status
+- Built and tested locally, with the vocabulary live in AWS.
+- **Not deployed:** the Lambda, template and site changes wait for `.\scripts\deploy.ps1`.
+- First real-microphone game: see Phase 6b.
+
+## Phase 6b — Interrupting, speed, background noise, and the 305 questions (2026-10-16)
+
+The first real-microphone game with Transcribe (the 2026-10-16 afternoon session, in `packages/agent/eval-results/live/`) showed:
+- **She couldn't be interrupted.** The mic was muted while she spoke.
+- **Replies were slow.** Each turn made 2 model rounds plus 2 Stockfish analyses (2–3.5 s). On top of that, Transcribe kept segments open 5–9 s while there was background sound.
+- **Background talk was treated as commands.** "Correct.", "Yeah.", "Gala appeared in a coral" went to the agent in conversation mode. A forced `make_move` then answered "X isn't a legal move" with six options, and "Correct." restarted the game.
+- **She talked too much.** Hints were fine, but error replies listed six moves.
+
+### Voice (web)
+- **Barge-in.** The mic stays open while Alexa talks (the browser's echo cancellation removes most of her voice). Only "Alexa…" or a stop word ("stop", "wait", "enough", "bas", "ruko"…) interrupts. Partials whose words mostly match what she is saying count as echo, and so does any Transcribe segment that began while she spoke. "Stop" while she is thinking cancels the answer on its way. `?bargein=0` restores strict half-duplex. Logic is in `wake.js` (`bargeIn`, `isOnlyStop`), tested in `scripts/test-wake.mjs`.
+- **Our own end of speech.** An utterance ends when its partial stops changing for `endpointMs(text)`:
+  - 0.7 s after a square or castling side, or a question;
+  - 0.8 s after yes/no and similar words;
+  - 1.1 s otherwise;
+  - 1.6 s after a single word;
+  - 2.5 s after a lone piece name ("knight…").
+  Later revisions of an utterance already sent are dropped; a real continuation is sent ("Alexa," … "let's play chess"). Code in `transcribe.js` (`onSegment`/`unsent`), tested in `scripts/test-ears.mjs`.
+- **`woken` flag.** `decide()` reports whether "Alexa" was said; the agent gets it with every utterance. Ignored utterances keep the listening window unchanged, with no chime.
+- **Timings.** Every reply's timings (model, board, voice) are logged in the drawer. In local mode the drawer and the exact streamed audio are mirrored to `packages/agent/eval-results/live/` (`<date>-drawer.log`, `<date>-<session>.pcm`). Replay the audio with `node scripts/test-transcribe.mjs --wav <file>.pcm`.
+
+### Agent
+- **Moves never wait for the model.** A move-shaped utterance goes straight to `make_move`; the server resolves the spoken move. Brief replies are built from templates (`quickMoveReply`): the two moves plus at most one fact (game over, a piece left hanging, a real mistake, a new opening). Chatty mode makes one model call to phrase it.
+- **Question router.** `routeQuestion` sends obvious questions straight to their tool:
+  - `hint` and `consider_move` answers are spoken as is, with no model call at all.
+  - `analyze_position`, `review_game`, `last_moves` and `game_history` need one model call to phrase the answer.
+  - Everything else goes to the model. At most 3 rounds, down from 6.
+- **Background filter.** Utterances heard without "Alexa" are graded `yes` / `maybe` / `no` by `addressedLevel`:
+  - `no` (no chess words, no question to Alexa) is dropped without any call.
+  - `maybe` reaches the model with an `ignore` tool.
+  - `yes` (a move, chess words, an answer to her question) is handled as if woken.
+  A failed move heard without "Alexa" is ignored silently.
+- **Guards:**
+  - No new game mid-game without restart words.
+  - No resign without "I resign" ("Can I resign?" asks first).
+  - No undo when "redo" was said.
+  - Questions ("Is f7 occupied?", "Can I castle?") never go down the move path.
+  - Hints are hidden only when the user asked for that.
+- **Brief by default**: one or two sentences. Questions get up to three, unless they asked for everything. Read-outs stay whole.
+- **New local tools:**
+  - `answer`: rules and general knowledge, grounded by a rules cheat sheet in the skill (the model once got promotion wrong).
+  - `ignore`.
+  - `set_preferences.confirmMoves`: "confirm each move before playing it", using `make_move` with `preview`.
+- The skill (`SKILL.md`) was rewritten with a routing table for all 18 question categories, the rules cheat sheet, and honest answers for missing features (no clock, pause, redo or handicap).
+
+### Chess server
+- `analyze_position`: everything about the position from the user's side. Engine evaluation in words and pawns, forced mates, the top 3 moves with the engine's real lines, and my threat (null-move search) with its line. Pieces under attack on both sides, pins, forks, mates in one, checks, winning captures. Ways out of check, pieces with no moves. Material and lost pieces, castling rights with reasons, king safety, development, centre, pawn structure, open files, activity, squares controlled, phase, opening, and the last moves with their quality. Pure position facts are in `chess/insight.ts`.
+- `consider_move`: "can I / what if" without playing. It says why a move is illegal: blocked by…, pinned by…, the square is attacked by…, castling rights or pieces in between, pawn rules. For a legal move it gives the quality, what the move does, whether it leaves something hanging, and my best reply.
+- `review_game` (mistakes, the first and the biggest with the better move, my last move's ideas), `offer_draw`.
+- `hint`: one move by default, 3 on request; `reveal: false` names only the piece, the area and the idea.
+- `make_move`:
+  - Illegal moves say why ("That move isn't possible: your bishop on f1 is blocked by your pawn on e2. Did you mean pawn to c4?").
+  - At most two related suggestions, never random ones.
+  - Hidden `preview` for confirm-each-move; `lossCp` is stored.
+- `new_game` takes a hidden `fen` / `setupMoves` (tests and puzzles). Engine calls take a start FEN. `topMoves` uses MultiPV.
+- Engine searches sync with `isready`/`readyok` before `go`. A stray line from an earlier search once made a fork position's best move "Kd1". `go` is sent outside the engine's output callback.
+
+### Evaluation
+- `npm run qa` (`packages/agent/scripts/qa-eval.ts`): all **305** questions the user listed (`eval/questions.ts`, 18 categories). Each is asked in a fitting position: Italian, Sicilian as Black, in check, fork, mate in one, queen attacked, pinned knight, two endgames, a game with a blunder, a finished game, no game. Every question gets a fresh game, through the real agent and Stockfish. **Amazon Nova Pro** grades each answer against the true facts (board, all legal moves, analysis, review). Its failures are re-read by hand: it misjudges some board facts, for example claiming that a pawn on e4 can capture e5.
+- `npm run sim` (`scripts/game-sim.ts`): whole games with moves spoken the way people say them and the way recognition mishears them ("pond to f3", "porn to a 3", "night", "24"). It mixes in background chatter (real lines from the live game, plus Hinglish) without the wake word, and questions from the list.
+- Note: Claude models on Bedrock need an AWS Marketplace subscription that this account can't complete. All six auto-created agreements terminated at once; nothing is active. The project uses Amazon Nova only.
+
+| run | result |
+|---|---|
+| qa round 1 (before the fixes above) | 271/305 = 89% (Nova Pro; about half the failures were judge errors), 2.4 s average |
+| sim round 1 | moves 54/54 played correctly, background 18/18 ignored, questions 17/20 answered |
+
+**Deployed 2026-10-16** (`.\scripts\deploy.ps1`, build `transcribe-5`, https://d2ammv4cvnzsu5.cloudfront.net):
+- **New Lambda** `alexa_chess_transcribe_url`, locked to the site's origin (a foreign origin gets 403).
+- **Production check** (scratch `verify-deployed.mjs`):
+  - a Polly clip streamed through the deployed presigned URL came back as "Alexa, let's play chess." / "knight to F3.";
+  - the deployed agent answered the short colour/level question, started a game and ignored "Correct." (49 ms);
+  - a move took 0.8 s and a hint 0.4 s, including Polly.
+- **Since the 5 PM live tests:**
+  - the wait after a bare "Alexa" is 12 s;
+  - a short answer can cut in over her question;
+  - fillers ("uh", "ok") no longer hide a question;
+  - a final with its tail cut off is replaced by its fuller partial;
+  - the always-visible debug screen (`web/debugscreen.js`, `?debug=0` hides it) shows what is heard and what happened to it.
+- **Finding:** music or TV near the mic was the main cause of the mishearings. With it off, recognition was good.
+
+### Live-site test (2026-10-16, ~6:30 PM) and "decide, don't ask"
+In 1.d4 e6 the user said "pawn takes e6" several times. Transcribe heard:
+- "pawn takes a 6."
+- "E6 elephant 6"
+- "takes sex."
+- "Bw takes a 6."
+
+**Every one was dropped in silence.** A move that didn't resolve without the wake word was ignored, which was a bug. (No white pawn could take on e6 there, but the player must hear that.) The user asked for any accent to work, and for no "Did you mean…? Did you mean…?" loops. Changes:
+- **A move attempt always gets an answer**, wake word or not. Accent-shaped attempts count as move attempts ("night S3", "night ef three", "92 S3").
+- **Decide instead of asking** (agent fast path):
+  - Unclear words are played as their best reading, announced as *"Taking 'night S3' as knight to f3; say undo if not."*
+  - With two readings, a constrained Nova call (`guessLegalMove`, legal moves only) picks one.
+  - Words that named no move go to the same decoder over all legal moves.
+  - An understood but illegal move gets one sentence of why ("I heard 'pawn takes e6': that isn't possible, none of your pawns can reach e6").
+  - Only a board question ("Which rook: c7 or e1?") or confirm-each-move mode still asks.
+- **Accent sound-alikes** in `spokenMove.ts` (`accentVariants`), tried when the literal reading isn't legal:
+  - spelled letters ("e for elephant", NATO words), handled before parsing so "e for" is never read as e4;
+  - rank words (sex/sikh/sax → six, ate → eight…);
+  - confusable files (a↔e and s→f are strong; b↔d, v, p, t, z, j, x are weak and only used when the words formed no move at all, so "pawn d4" can't become "b4").
+- **What was heard is said back** in illegal-move replies. Explanations know captures with nothing to take, and moves where no piece was named.
+- **Vocabulary**: 64 capture phrases ("takes e-six" → "takes e6"), 559 phrases in all.
+- **Tests**: chess server 131, agent 58, page 73 checks. The Polly suite runs per accent (`--voice Kajal|Joanna|Matthew|Amy|Brian`).
+
+Latency in the replay of the live session (local, real Bedrock and Polly), from the end of speech to audio ready:
+- moves: **0.45–0.8 s** (was ~2.5–3.5 s);
+- background: dropped in under 20 ms;
+- routed hints and "can I…": about 1 s;
+- analysis questions: about 2 s.
+
+## Phase 7 — Open-mic conversation and Chrome one-phrase hearing (2026-10-17)
+
+A friend's Voice Chess (Alexa+ MCP add-on, no LLM in the move path) heard moves better than ours. A side-by-side run of both
+parsers on each other's test phrases showed that our matcher was already the stronger one: his 170 phrases scored 153 right
+and 16 "did you mean" for us, against his 33 of our 49. The gap was the hearing in front of the parser: his page uses
+Chrome's recognizer in English (US), one phrase at a time, with no wake word and no timers of its own. Changes:
+
+### Voice (web)
+- **Chrome one phrase at a time is the default** (`continuous=false`, interim results for captions only, 5 alternatives,
+  en-US). Chrome decides when a phrase is over; no client endpointing or "revision" dropping. The mic reopens after each
+  phrase and as soon as she stops talking; never while she talks or thinks. Transcribe stays available with `?stt=transcribe`.
+- **Open mic: no wake word.** After the start tap everything heard is sent (`decide(..., {openMic})`); "Alexa" still
+  works. `?wake=1` restores the wake word with its follow-up windows.
+- **Half a move is held**: "knight…" (phrase ended at the pause) is joined to the next phrase ("f3"), up to 4 s.
+- **"Pause" / "stop listening" / "go to sleep"** mutes the mic by voice; tap the speaker or press M to talk again.
+  Tap, Esc or Space cuts her off while she speaks.
+- A speaking safety net: if the audio's "ended" event never comes, the mic reopens once nothing is playing.
+- Mic-cycle notes (silence restarts every few seconds) are logged only with `?verbose`.
+
+### Agent
+- **Open-mic filter**: one-word requests ("hint", "undo", "what?"), greetings and thanks, and short phrases with a number
+  mid-game ("14", "is he is 5": a misheard move) are answered instead of dropped.
+- **Answers to her questions**: "no, knight f3" is a new move (not "scrap that"), also when a lower alternative is just
+  "no"; "no, the other one"; "the one on b1"; "the c pawn"; "kingside" / "long"; "the left one" (from the player's side).
+
+### Chess server
+- "castle on the queen's side" was played **kingside** (the apostrophe became "queens side"); fixed.
+- A bare "castle" with both sides legal now asks "Castle which way: kingside, or queenside?" (`doubt: "which"`).
+- A lower alternative can no longer outvote the best transcript (weights per move are the best, not the sum).
+- NATO letters ("pawn to echo four", "echo takes delta five") and the starting file ("knight b d2", "knight to d2 of b",
+  "from the f file", "the c pawn takes d5") are read directly and played, not asked about.
+
+### Tests
+- Chess server 155, agent 61, page 73 checks. Both parsers on both phrase sets: 170/170 and 49/49.
+- Browser run with a scripted recognizer against the local agent, MCP server, Bedrock and Polly: open-mic start, silence
+  restarts, half-duplex, "knight" + "f3" joined (1.4 s, no model), "thank you" and "14" answered, "pause" mutes, "no,
+  knight c3" played (0.7 s). Not yet tried with a real microphone in Chrome, and not deployed.

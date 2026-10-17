@@ -120,3 +120,37 @@ button, input, select { font: inherit; color: inherit; }
 .debug .tools { color: #c8a2ff; font-family: ui-monospace, Consolas, monospace; }
 .debug .meta { color: var(--muted); }
 .debug li.note { color: var(--muted); font-style: italic; }
+
+/* ---------- always-visible debug screen (debugscreen.js; ?debug=0 hides it) ---------- */
+#debugscreen {
+  position: fixed; z-index: 5; right: 0; top: 0; bottom: 0; width: min(420px, 42vw);
+  display: flex; flex-direction: column; gap: 6px; padding: 12px 14px;
+  background: #070c14f0; border-left: 1px solid #ffffff1a;
+  font: 13px/1.4 ui-monospace, "Cascadia Mono", Consolas, monospace; color: var(--text);
+}
+body.with-debugscreen .room { margin-right: min(420px, 42vw); width: auto; }
+.ds-top { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.ds-status { color: var(--muted); }
+.ds-status.bad { color: var(--warn); }
+.ds-meter { flex: 0 0 90px; height: 8px; border-radius: 4px; background: #ffffff14; overflow: hidden; }
+.ds-meter > span { display: block; height: 100%; width: 0; background: linear-gradient(90deg, #2ecc71, #f1c40f 75%, #e74c3c); transition: width 90ms linear; }
+.ds-mode { flex-basis: 100%; color: var(--accent); }
+.ds-hearing-label { margin-top: 6px; font-size: 11px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); }
+.ds-hearing { min-height: 2.6em; padding: 8px 10px; border-radius: 8px; background: #ffffff0d; font-size: 20px; line-height: 1.3; color: #ffffffaa; font-family: var(--font); }
+.ds-hearing.live { color: #fff; box-shadow: 0 0 0 1px var(--accent) inset; }
+.ds-hearing[data-note]:not([data-note=""])::after { content: "  (" attr(data-note) ")"; font-size: 13px; color: var(--warn); }
+.ds-list { list-style: none; margin: 6px 0 0; padding: 0; overflow-y: auto; flex: 1; display: flex; flex-direction: column; gap: 4px; }
+.ds-list li { padding: 4px 6px; border-radius: 6px; background: #ffffff08; word-break: break-word; }
+.ds-time { color: #ffffff55; font-size: 11px; }
+.ds-detail { color: var(--muted); }
+.ds-heard .ds-text { color: #fff; }
+.ds-sent .ds-text { color: #7ee2a8; }
+.ds-ignored .ds-text, .ds-dropped .ds-text { color: #ffb86b; }
+.ds-reply .ds-text { color: #8fd3ff; }
+.ds-error .ds-text { color: #ff7b7b; }
+.ds-interrupt .ds-text { color: #e0a8ff; }
+@media (max-width: 760px) {
+  #debugscreen { top: auto; left: 0; width: auto; height: 46vh; border-left: 0; border-top: 1px solid #ffffff1a; }
+  body.with-debugscreen .room { margin-right: 0; height: 54%; }
+  .ds-hearing { font-size: 17px; }
+}

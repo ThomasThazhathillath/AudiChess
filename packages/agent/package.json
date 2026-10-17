@@ -9,7 +9,9 @@
     "chat": "node --import ./scripts/md-loader.mjs --import tsx scripts/chat.ts",
     "dev": "node --import ./scripts/md-loader.mjs --import tsx scripts/dev-server.ts",
     "ab": "node --import ./scripts/md-loader.mjs --import tsx scripts/ab.ts",
-    "eval": "node --import ./scripts/md-loader.mjs --import tsx scripts/converse-eval.ts"
+    "eval": "node --import ./scripts/md-loader.mjs --import tsx scripts/converse-eval.ts",
+    "qa": "node --import ./scripts/md-loader.mjs --import tsx scripts/qa-eval.ts",
+    "sim": "node --import ./scripts/md-loader.mjs --import tsx scripts/game-sim.ts"
   },
   "dependencies": {
     "@aws-sdk/client-bedrock-runtime": "^3.1152.0",

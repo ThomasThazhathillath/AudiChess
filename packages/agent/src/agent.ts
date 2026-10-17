@@ -9,6 +9,7 @@ import type {
 import type { ChessTools, McpTool } from "./mcpClient.js";
 import { type Chattiness, type Session, type SessionStore, newSession, touch } from "./sessions.js";
 import { DEFAULT_VOICE, type Speak, VOICES } from "./voice.js";
+import { decodeMove } from "./guessMove.js";
 import skill from "../skills/blind-chess/SKILL.md";
 
 export type Converse = (input: ConverseCommandInput) => Promise<ConverseCommandOutput>;
@@ -37,9 +38,18 @@ export interface TurnInput {
   alternatives?: string[];
   /** The same utterance heard by the page's chess-grammar recognizer ("pawn d four"), when it caught chess words. */
   chessHeard?: string;
+  /**
+   * false when the page heard this in conversation mode, without "Alexa": it may be background talk (TV, someone
+   * else in the room), so anything that isn't clearly for Alexa is ignored silently. Default true.
+   */
+  woken?: boolean;
 }
 
 export interface TurnResult {
+  /** True when the utterance was background talk: nothing is said and the page keeps listening. */
+  ignored?: boolean;
+  /** Where the time went, in milliseconds. */
+  timings?: { modelMs: number; toolMs: number; ttsMs: number; totalMs: number; fastPath: boolean };
   reply: string;
   gameId?: string;
   gameOver: boolean;
@@ -52,10 +62,12 @@ export interface TurnResult {
   usage: { inputTokens: number; outputTokens: number; cacheReadTokens: number; cacheWriteTokens: number; rounds: number };
 }
 
-const MAX_ROUNDS = 6;
+// Three model rounds at most: in the eval it once looped through six tool calls (11.8 s) on one question.
+const MAX_ROUNDS = 3;
 
-// The agent fills these in itself, so the model never copies ids or long transcripts around.
-const HIDDEN_ARGS = ["gameId", "sessionId", "alternatives"];
+// The agent fills these in itself, so the model never copies ids or long transcripts around. fen/setupMoves are
+// for tests and puzzles, preview for confirm-before-playing: never the model's choice.
+const HIDDEN_ARGS = ["gameId", "sessionId", "alternatives", "fen", "setupMoves", "preview"];
 const LIST_RECENT_FLAG = "listRecentGames";
 
 /** The skill body without its YAML frontmatter. */
@@ -76,9 +88,32 @@ const LOCAL_TOOLS: Tool[] = [
             chattiness: { type: "string", enum: ["minimal", "brief", "chatty"] },
             voice: { type: "string", enum: Object.keys(VOICES) },
             speed: { type: "string", enum: ["slower", "normal", "faster"] },
+            confirmMoves: { type: "boolean", description: "true: repeat each move back and play it only after a yes ('confirm each move before playing it')." },
           },
         },
       },
+    },
+  },
+  {
+    toolSpec: {
+      name: "answer",
+      description:
+        "Answer from general chess knowledge when no board fact is needed: rules (en passant, castling rules, stalemate, fifty-move rule), opening ideas in general, how to improve, what a fork is, and features this game doesn't have (there is no clock, no redo, no pause: the game simply waits). Never state anything about the current position here; use the board tools for that. Put the short spoken answer in `reply`.",
+      inputSchema: {
+        json: {
+          type: "object",
+          properties: { reply: { type: "string", description: "What Alexa says: one to three short spoken sentences." } },
+          required: ["reply"],
+        },
+      },
+    },
+  },
+  {
+    toolSpec: {
+      name: "ignore",
+      description:
+        "Stay silent: the words were clearly NOT meant for you (someone talking to another person, a phone call, TV, a stray word). Any question about chess, this game, the rules, time, or you is for you: answer it instead. When in doubt, answer.",
+      inputSchema: { json: { type: "object", properties: {} } },
     },
   },
   {
@@ -106,6 +141,12 @@ const LOCAL_TOOLS: Tool[] = [
 
 // Results of these tools carry facts; the model words the reply itself instead of reading out `speech`.
 const FACT_TOOLS = new Set(["make_move", "new_game"]);
+
+/** Board tools whose `speech` already is the precise answer: spoken as is, without a second model call. */
+const DIRECT_SPEECH = new Set(["describe_square", "list_pieces", "legal_moves", "read_board", "hint", "consider_move", "undo", "resign", "set_level", "offer_draw"]);
+/** Of those, the ones whose words also answer a yes/no question. */
+const ANSWERS_YES_NO = new Set(["describe_square", "hint", "consider_move", "undo", "resign", "set_level", "offer_draw"]);
+const YES_NO = /^\s*(?:is|are|am|was|were|does|do|did|has|have|should|could|can|would|will|may)\b/i;
 
 /** MCP tool definitions -> Bedrock Converse toolSpecs, minus the arguments the agent fills in. */
 export function toBedrockTools(tools: McpTool[]): Tool[] {
@@ -144,13 +185,14 @@ export function toBedrockTools(tools: McpTool[]): Tool[] {
   return [...mcp, ...LOCAL_TOOLS];
 }
 
-export const DEFAULT_CHATTINESS: Chattiness = "chatty";
+// Brief by default: on 2026-10-16 the user said she "just keeps talking" and answers took too long.
+export const DEFAULT_CHATTINESS: Chattiness = "brief";
 
 const CHATTINESS_RULES: Record<Chattiness, string> = {
-  minimal: "Chattiness: MINIMAL. Just the two moves, plus a few words only for checks, big captures, blunders, openings and the result.",
-  brief: "Chattiness: BRIEF. The two moves plus at most one short remark when something is worth saying.",
+  minimal: "Chattiness: MINIMAL. Moves only; answers in one short sentence.",
+  brief: "Chattiness: BRIEF (default). One or two short sentences. Answer exactly what was asked, most important fact first, and stop. No lists of options unless they asked for several.",
   chatty:
-    "Chattiness: CHATTY (default). The two moves plus one or two lines of real personality almost every turn: react, tease, talk about your plans or theirs. Two to three sentences in total.",
+    "Chattiness: CHATTY. The two moves plus one or two lines of real personality: react, tease, talk about your plans or theirs. Two to three sentences in total.",
 };
 
 /**
@@ -179,12 +221,18 @@ export function recentPhrases(turns: Session["turns"], lookback = 6): string[] {
   return [...out].slice(-14);
 }
 
+/** How strong each level is, for "how strong are you / what's your rating" (Stockfish settings in engine.ts). */
+const LEVEL_NAMES: Record<number, string> = {
+  1: "beginner, the weakest setting", 2: "novice", 3: "casual", 4: "club player, about 1400 Elo", 5: "intermediate, about 1700 Elo",
+  6: "strong club player, about 2000 Elo", 7: "expert, about 2400 Elo", 8: "full-strength Stockfish, far stronger than any human",
+};
+
 /** The per-session part of the system prompt (the skill itself is static, so it can be cached). */
 function sessionState(session: Session): string {
   let state: string;
   if (!session.gameId) state = "There is no game in progress. If the user wants to play, find out their colour and difficulty (ask once if they didn't say), then call new_game.";
   else if (session.gameOver) state = `The last game is over (the user played ${session.humanColor}). For questions about it call game_history; offer a rematch if they want to keep playing.`;
-  else state = `A game is in progress: the user plays ${session.humanColor} against level ${session.level}. The game is selected automatically for every tool.`;
+  else state = `A game is in progress: the user plays ${session.humanColor} against you at level ${session.level} (${LEVEL_NAMES[session.level ?? 3] ?? "casual"}). The game is selected automatically for every tool.`;
   const chattiness = CHATTINESS_RULES[session.chattiness ?? DEFAULT_CHATTINESS];
   const avoid = recentPhrases(session.turns);
   const variety = avoid.length ? `\nYou said these recently. Do not reuse them or start the same way: ${avoid.map((p) => `"${p}"`).join(", ")}.` : "";
@@ -292,12 +340,15 @@ export function limitSentences(text: string, max: number): string {
   return sentences.length <= max ? text : sentences.slice(0, max).join(" ");
 }
 
-const SENTENCE_LIMIT: Record<Chattiness, number> = { minimal: 2, brief: 3, chatty: 4 };
+const SENTENCE_LIMIT: Record<Chattiness, number> = { minimal: 2, brief: 2, chatty: 4 };
+/** Answers to questions may be a little longer than move turns; "explain everything" lifts the limit. */
+const ANSWER_LIMIT: Record<Chattiness, number> = { minimal: 2, brief: 3, chatty: 4 };
+const WANTS_DETAIL = /\b(everything|in detail|detailed|all (?:of )?(?:my|the|your)|every|whole|full|row by row|rank by rank|aloud|read (?:out|all|me)|list all|step by step)\b/i;
 
 /** "talk more" / "talk less" / "just the moves": unambiguous, so no model call (it once picked game_status). */
 export function chattinessCommand(text: string): Chattiness | undefined {
   const t = text.trim().toLowerCase().replace(/[.!]+$/, "");
-  if (/^(?:please )?(?:talk|chat) (?:a bit |a little |a lot )?more(?: please)?$|^be (?:more )?chatty$/.test(t)) return "chatty";
+  if (/^(?:please )?(?:talk|chat) (?:a bit |a little |a lot )?more(?: please)?$|^be (?:more )?chatty$|^(?:can you |could you |please )?explain (?:every|each|all your|your) moves?(?: please)?\??$/.test(t)) return "chatty";
   if (/^(?:please )?(?:talk|chat) (?:a bit |a little )?less(?: please)?$|^(?:keep it|be) (?:short|brief)$/.test(t)) return "brief";
   if (/^(?:just|only) (?:say )?(?:the )?moves(?: please)?$|^be quiet(?:er)?$/.test(t)) return "minimal";
   return undefined;
@@ -340,22 +391,45 @@ const RANK_SPOKEN: Record<string, string[]> = {
   "5": ["5", "five"], "6": ["6", "six"], "7": ["7", "seven"], "8": ["8", "eight"],
 };
 
+/** The letter or number a SAN names its piece's starting square by: "b" in Nbd2, "1" in R1e2, "e" in exd5. */
+const disambiguator = (san: string) => /^(?:[NBRQK]([a-h]|[1-8])x?|([a-h])x)[a-h][1-8]/.exec(san)?.slice(1).find(Boolean);
+
 /**
- * What the user said to the question "Did you mean X, or Y?" / "Which rook?": yes, no, first/second, or the
- * file/rank that tells the candidates apart. Anything else is a fresh utterance (undefined).
+ * What the user said to the question "Did you mean X, or Y?" / "Which rook?" / "Castle which way?": yes, no,
+ * first/second, kingside/queenside, left/right, or the file/rank/square that tells the candidates apart.
+ * Anything else is a fresh utterance (undefined), including "no, knight f3": a new move, not a refusal.
+ * @param humanColor "b" when the player sits on Black's side, so "left" is the h-file side.
  */
-export function answerToPending(text: string, candidates: string[]): { pick: string } | { no: true } | undefined {
+export function answerToPending(text: string, candidates: string[], humanColor?: string): { pick: string } | { no: true } | undefined {
   const t = text.toLowerCase().replace(/[^a-z0-9 ]+/g, " ").replace(/\s+/g, " ").trim();
   if (!t || candidates.length === 0) return undefined;
-  if (/^(?:no|nope|nah|neither|none|wrong|cancel|never ?mind)(?: .*)?$/.test(t)) return { no: true };
+  const no = /^(?:no|nope|nah|neither|none|wrong|cancel|never ?mind)\b ?(.*)$/.exec(t);
+  if (no) {
+    const rest = no[1].trim();
+    if (candidates.length > 1 && /^(?:i meant )?(?:the )?(?:other|second|2nd|last)(?: one)?$/.test(rest)) return { pick: candidates[1] };
+    if (rest && looksLikeMove(rest)) return undefined;
+    return { no: true };
+  }
   if (/^(?:(?:yes|yeah|yep|yup|yah|ya|sure|ok|okay|correct|right|exactly|that one|that's it|thats it|do it|go ahead|please)(?: |$))+$/.test(t)) return { pick: candidates[0] };
   if (candidates.length > 1) {
+    if (candidates.includes("O-O") && candidates.includes("O-O-O")) {
+      if (/\b(?:king ?side|kings side|short|king)\b/.test(t)) return { pick: "O-O" };
+      if (/\b(?:queen ?side|queens side|long|queen)\b/.test(t)) return { pick: "O-O-O" };
+    }
     if (/^(?:the )?(?:first|1st|one|former)(?: one)?$/.test(t)) return { pick: candidates[0] };
     if (/^(?:the )?(?:second|2nd|two|other|latter|last)(?: one)?$/.test(t)) return { pick: candidates[1] };
-    // "the one on c" / "c file" / "from e": the letter or number the SAN disambiguates by.
-    const words = new Set(t.split(" "));
+    // "the left one" / "the one on the right", as the player sees the board.
+    const files = candidates.map(disambiguator);
+    const side = /\b(left|right)\b/.exec(t)?.[1];
+    if (side && files.every((f) => f && /[a-h]/.test(f)) && new Set(files).size === candidates.length) {
+      const order = [...candidates].sort((a, b) => disambiguator(a)!.localeCompare(disambiguator(b)!));
+      const towardA = (side === "left") === (humanColor !== "b");
+      return { pick: towardA ? order[0] : order[order.length - 1] };
+    }
+    // "the one on b1" / "c file" / "from e": the letter or number the SAN disambiguates by ("the one" isn't rank 1).
+    const words = new Set(t.replace(/\b(?:the|that) one\b/g, " ").split(" ").filter(Boolean).flatMap((w) => (/^[a-h][1-8]$/.test(w) ? [w[0], w[1]] : [w])));
     const hits = candidates.filter((san) => {
-      const d = /^[NBRQK]([a-h]|[1-8])x?[a-h][1-8]/.exec(san)?.[1];
+      const d = disambiguator(san);
       if (!d) return false;
       return (FILE_SPOKEN[d] ?? RANK_SPOKEN[d] ?? []).some((w) => words.has(w));
     });
@@ -364,21 +438,182 @@ export function answerToPending(text: string, candidates: string[]): { pick: str
   return undefined;
 }
 
-const QUESTION_WORDS = /\b(what|which|why|how|where|who|whom|when|can you|could you|tell me|explain|did you|do you|are you|is there|repeat|undo|resign|hint)\b/i;
-const SQUARE_ISH = /\b[a-h]\s?[1-8]\b|\b[a-h]\s(?:one|two|three|four|five|six|seven|eight|for|tree|free)\b|\b(?:castle|castles|castling|takes|take)\b/i;
+const QUESTION_WORDS = /\b(what|which|why|how|where|who|whom|when|can you|could you|can i|could i|should i|may i|am i|is it|is this|is that|is my|are my|if i|would|tell me|explain|did you|do you|are you|is there|repeat|undo|resign|hint)\b/i;
+const SQUARE_ISH = /\b[a-h]\s?[1-8]\b|\b[a-h]\s(?:one|two|three|four|five|six|seven|eight|for|tree|free)\b|\b(?:castle|castles|castling|takes|take)\b|^\W*2[1-8]\W*$|\b(?:twenty|swansea)\s(?:[1-8]|one|two|three|four|five|six|seven|eight)\b/i;
+
+/** A question by its first word: "Is square f7 occupied?", "Does my knight…", "Should I castle?" (never a move). */
+const QUESTION_START = /^\s*(is|are|am|was|were|does|do|did|has|have|had|should|shall|could|can|would|will|may|might|must|why|what|which|where|who|how|when|tell|explain|describe|read|show|list|give|repeat)\b/i;
 
 /** Speech that is clearly a move attempt: it must go to make_move, never to small talk (ask_again). */
 export function looksLikeMove(...heard: string[]): boolean {
-  const text = heard.filter(Boolean).join(" | ");
-  return !QUESTION_WORDS.test(heard[0] ?? "") && SQUARE_ISH.test(text);
+  const first = heard[0] ?? "";
+  if (QUESTION_WORDS.test(first) || QUESTION_START.test(first) || /\?\s*$/.test(first)) return false;
+  // Each alternative on its own: "24" (pawn d4) is only move-shaped as a whole utterance. Accents also give a piece
+  // name plus a mangled square ("night S3", "night ef three", "92 S3").
+  return heard.some((h) => !!h && (SQUARE_ISH.test(h) || PIECE_THEN_RANK.test(h) || /^\W*9[1-8]\s+[a-z]{1,2}\s?[1-8]\W*$/i.test(h)));
 }
+const PIECE_THEN_RANK = /\b(?:knight|night|nite|pawn|porn|pond|bishop|rook|rock|ruk|queen|king|horse)\b.*(?:\b[a-z]{1,2}\s?[1-8]|\b(?:one|two|three|four|five|six|seven|eight|sex|tree|free)\b)/i;
 
 /** Strips a leading wake word so "Alexa, knight f3" reaches the model as "knight f3". */
 export function stripWakeWord(text: string): string {
   return text.replace(/^\s*(hey\s+)?(alexa|alexia|alexis|a lexa)[\s,.!:]*/i, "").trim();
 }
 
+// ---------- conversation mode: is this for Alexa at all? ----------
+
+const CHESS_WORDS =
+  /\b(alexa|chess|game|games|move|moves|moved|play|played|playing|pawn|pawns|knight|knights|bishop|bishops|rook|rooks|queen|queens|king|kings|castle|castling|check|checkmate|mate|stalemate|draw|resign|undo|take ?back|hint|suggest|suggestion|recommend|best|worst|board|square|squares|piece|pieces|position|opening|endgame|middlegame|threat|threatening|attack|attacking|attacked|defend|capture|captured|takes|fork|pin|pinned|skewer|sacrifice|trade|exchange|promote|promotion|passant|rating|elo|strong|strength|level|easy|medium|hard|harder|easier|beginner|expert|grandmaster|white|black|winning|losing|win|lose|ahead|material|blunder|mistake|mess(?:ed)? up|evaluation|engine|clock|time|timer|seconds|minutes|running low|repetition|threefold|fifty|opposition|scenario|repeat|slower|faster|louder|talk|quiet|explain|rules?|legal|illegal|rematch|restart|pause|resume|save|analy[sz]e|review|teach|learn|practice|improve|puzzle|quiz|tactic|tactics|safe|trouble|missing|trap|center|centre|gambit|defen[cs]e|variation|scholar|opponent)\b/i;
+const FOR_ALEXA = /^(what|where|which|why|how|who|when|is|are|am|can|could|should|would|will|do|does|did|was|were|give|tell|show|read|describe|repeat|say|explain|let'?s|let me|i want|i'd like|please|help)\b/i;
+const SHORT_ANSWER = /^(yes|yeah|yep|yup|no|nope|nah|sure|okay|ok|correct|right|exactly|haan|han|nahi|first|second|the first|the second|that one|do it|go ahead|cancel|never ?mind|white|black|random|easy|medium|hard|whatever|you (?:pick|choose|decide)|kingside|queenside|king side|queen side|short|long|left|right|the left|the right)\b/i;
+/** One-word requests that are clearly for her in an open-mic conversation ("hint", "undo"). */
+const COMMAND_WORD = /^(hint|undo|take ?back|repeat|again|help|resign|board|status|rematch|louder|slower|faster|pardon|what)\W*$/i;
+/** Greetings and thanks: a person talking to her, so she answers like one. */
+const SOCIAL = /^(hi|hello|hey there|hiya|good (?:morning|afternoon|evening|night)|thanks|thank you|thank you so much|cheers|good game|gg|well played|nice (?:move|one|try|game)|good move|great move|wow|oh no|oops|how are you|how's it going|what's up|bye|goodbye)\b/i;
+
+/**
+ * Speech heard without "Alexa" (the open mic: no wake word needed) is acted on only when it is plausibly for her: a
+ * move, chess words, a question or request to her, a greeting, or an answer to the question she just asked.
+ * Everything else ("Correct.", "Gala appeared in a coral", "I.", someone on the phone) is dropped without a model call.
+ */
+export function addressedToAlexa(heard: string[], session: Session): boolean {
+  return addressedLevel(heard, session) !== "no";
+}
+
+/**
+ * "yes": clearly for Alexa (a move, chess words, an answer to her question): handled as if she was woken.
+ * "maybe": a generic question with no chess words ("what is he doing"): the model decides, with `ignore` available.
+ * "no": background, dropped without a model call.
+ */
+export function addressedLevel(heard: string[], session: Session): "yes" | "maybe" | "no" {
+  // "Uh, why did you choose that?": fillers first, then decide (live test, 2026-10-16).
+  const text = (heard[0] ?? "").trim().replace(/^(?:(?:uh+|um+|hmm+|ok(?:ay)?|so|and|well|hey|acha|achha|haan|arey?)[\s,.!]+)+/i, "");
+  const words = text.split(/\s+/).filter(Boolean);
+  if (words.length === 0) return "no";
+  if (looksLikeMove(...heard)) return "yes";
+  const lastReply = [...session.turns].reverse().find((t) => t.role === "assistant")?.text ?? "";
+  const waitingForAnswer = !!session.pending || asksQuestion(lastReply);
+  if (waitingForAnswer && SHORT_ANSWER.test(text) && words.length <= 6) return "yes";
+  if (COMMAND_WORD.test(text) || SOCIAL.test(text)) return "yes";
+  // Mid-game, a short phrase with a number is a move she misheard ("14", "is he is 5"): answer it, never drop it.
+  if (session.gameId && !session.gameOver && words.length <= 5 && /\b\d{1,2}\b/.test(text)) return "yes";
+  if (heard.some((h) => CHESS_WORDS.test(h))) return words.length >= 2 || waitingForAnswer ? "yes" : "no";
+  return FOR_ALEXA.test(text) && words.length >= 3 ? "maybe" : "no";
+}
+
+// ---------- question router: the common questions skip the model's tool choice ----------
+
+const NUMBER_WORDS: Record<string, number> = { two: 2, three: 3, "2": 2, "3": 3, several: 3, top: 3, few: 3, some: 3 };
+/** "A small hint", "without revealing", "don't tell me the move": the only ways to ask for a hidden hint. */
+const DONT_REVEAL = /\b(small|little|tiny|subtle|vague|gentle)\b.*\bhint\b|without (?:revealing|giving|telling)|don'?t (?:tell|reveal|give away|say)|not the (?:answer|move)|puzzle|quiz/i;
+
+/**
+ * The tool (and arguments) for questions whose tool is unambiguous, so no model call is needed to pick it.
+ * hint and consider_move answers are then spoken as is (no model at all); analysis answers get one phrasing call.
+ * Anything not matched here goes to the model as usual.
+ */
+export function routeQuestion(text: string): { name: string; args: Record<string, unknown>; phrase?: boolean } | undefined {
+  const t = text.toLowerCase().replace(/[’']/g, "'");
+  // A puzzle from this position: the best move, kept hidden, framed by the model as a puzzle.
+  if (/\b(puzzle|quiz me)\b/.test(t)) return { name: "hint", args: { count: 1, reveal: false }, phrase: true };
+  // "The safest / most aggressive / easiest move": the top three, and the model picks the one that fits.
+  if (/\b(safest|most aggressive|aggressive move|easiest|simplest|grandmaster (?:play|move)|solid move|quiet move)\b/.test(t)) {
+    return { name: "hint", args: { count: 3, reveal: true }, phrase: true };
+  }
+  if (!/\b(avoid|worst|shouldn'?t|not play|bad move)\b/.test(t) && /\b(hint|suggest|suggestion|recommend|what should i (?:play|do|move)|what(?:'s| is) (?:my |the )?best (?:move|option|play)|(?:my |the )?(?:best|top) (?:\w+ )?moves|what would you play|what would a grandmaster play|what move should i)\b/.test(t)) {
+    const count = /\b(two|three|2|3|several|top|few|some)\b.*\bmoves\b|\bmoves\b.*\b(two|three|2|3)\b/.exec(t);
+    const n = count ? NUMBER_WORDS[count[1] ?? count[2]] ?? 3 : 1;
+    const reveal = !DONT_REVEAL.test(t);
+    return { name: "hint", args: { count: reveal ? n : 1, reveal } };
+  }
+  // "Can I castle?", "can I move my king to e2?", "what happens if I take on d5?", "is knight g5 safe?": a concrete
+  // move (a square or castling) checked without playing it.
+  // Rules in general ("can I castle while in check?", "through an attacked square?") are not about this position.
+  const aboutRules = /\b(while|ever|through|in general|normally|rule|rules|allowed to|after (?:moving|my king)|if my king has)\b/.test(t);
+  if (!aboutRules && /\b(can i|could i|may i|am i allowed|why can'?t i|is it legal|what happens if i|what if i|should i|is it safe to|would it be safe to|if i (?:play|move|take|capture))\b/.test(t) && /\b(castle|castling|[a-h]\s?[1-8])\b/.test(t)) {
+    return { name: "consider_move", args: { move: text } };
+  }
+  if (/\b(would have happened|should have played|had played|could have played|did i (?:mess|blunder|make a mistake)|(?:was|is) (?:my|that) (?:last )?move (?:good|bad|ok|okay|a mistake|a blunder|the best)|biggest (?:blunder|mistake)|first mistake|where did i go wrong|best move i missed|why did you (?:play|move|do)|explain your (?:last )?move|analy[sz]e (?:the|my|this) game|how (?:am i|have i been) (?:doing|playing)|mistake, an inaccuracy or a blunder)\b/.test(t)) {
+    return { name: "review_game", args: {} };
+  }
+  // The move list: "first move of the game", "the moves so far", "the notation".
+  if (/\b(first move of the game|move sequence|moves so far|all the moves|read the moves|game notation|the notation|pgn|three moves ago|two moves ago|moves ago|whole game)\b/.test(t)) {
+    return { name: "game_history", args: {}, phrase: true };
+  }
+  if (!aboutRules && /\b(lost|captured|been taken|taken so far|trapped|stuck|can'?t move|misplaced|worst piece|least active|most active|inactive|exchange|trade|stalemate|promote my pawn|pawn promote|promote safely|in check|checkmate|mate in|threat|threaten|threatening|under attack|attacking|attacked|hanging|undefended|pinned|a pin|fork|skewer|tactic|winning|losing|who(?:'s| is) better|better position|evaluation|eval|material|ahead|behind|trouble|missing|weakness|weak|passed pawn|isolated|doubled|open file|centre|center|developed|development|king safety|endgame|what opening|which opening|name of (?:this|the) opening|planning|plan|trap|is my king safe|am i doing okay|can i win)\b/.test(t)) {
+    return { name: "analyze_position", args: {} };
+  }
+  if (/\b(last move|last two moves|last (?:three|five|few) moves|which piece moved|what did (?:you|i) just play|what was (?:your|my) last move)\b/.test(t)) {
+    const n = /\b(three|five|few)\b/.exec(t)?.[1];
+    return { name: "last_moves", args: { count: n === "three" ? 6 : n === "five" || n === "few" ? 10 : 2 } };
+  }
+  return undefined;
+}
+
+/** Resigning only on a clear statement, never on a question ("can I resign?"). */
+const RESIGN_WORDS = /^(?:ok(?:ay)?,? )?(?:yes,? )?(?:i (?:resign|give up|quit|surrender|concede)|resign|i want to resign|i'?d like to resign|let me resign|i'?ll resign)\b(?!.*\?)/i;
+
+/**
+ * Accent-proof fallback for a move the spoken-move matcher couldn't place: the model gets only the legal moves and
+ * what speech recognition heard, and names the legal move that sounds closest, or none. `among` narrows it to the
+ * matcher's candidates. The caller plays it and says so ("Taking 'night S3' as knight to f3; say undo if not").
+ */
+export async function guessLegalMove(
+  deps: AgentDeps,
+  gameId: string,
+  heard: string[],
+  reason: string | undefined,
+  timings: { modelMs: number; toolMs: number },
+  usage: TurnResult["usage"],
+  among?: string[],
+): Promise<{ san: string } | undefined> {
+  let t = Date.now();
+  let legal = among ?? [];
+  if (!among) {
+    const lm = await deps.tools.callTool("legal_moves", { gameId });
+    timings.toolMs += Date.now() - t;
+    legal = Array.isArray(lm.data.moves) ? (lm.data.moves as unknown[]).map(String) : [];
+  }
+  if (legal.length === 0) return undefined;
+  t = Date.now();
+  const { san, usage: used } = await decodeMove(deps.converse, deps.modelId, heard, legal, reason);
+  timings.modelMs += Date.now() - t;
+  usage.rounds++;
+  addUsage(usage, used);
+  return san ? { san } : undefined; // played straight away by the caller, which announces it in words
+}
+
+/** A restart mid-game needs the words for it: a stray "correct" once started a new game over a game in progress. */
+const RESTART_WORDS = /\b(new game|start (?:over|again|afresh)|restart|rematch|play again|another game|fresh game|reset|from the (?:start|beginning)|start a new)\b/i;
+
+const capitalize = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
+
+/**
+ * A move turn without a model call: the two moves, plus one fact when something matters (game over, a piece left
+ * hanging, a real mistake, a new opening). Used for brief/minimal chattiness; chatty mode lets the model phrase it.
+ */
+export function quickMoveReply(result: Record<string, unknown>, chattiness: Chattiness, seed = 0): string {
+  const yours = String(result.yourMoveSpoken ?? "");
+  const mine = typeof result.engineMoveSpoken === "string" ? result.engineMoveSpoken : "";
+  const forms = mine
+    ? [`${capitalize(yours)}. I play ${mine}.`, `${capitalize(yours)}; I answer ${mine}.`, `You play ${yours}, I play ${mine}.`, `${capitalize(yours)}. My move: ${mine}.`]
+    : [`${capitalize(yours)}.`];
+  let reply = forms[Math.abs(seed) % forms.length];
+  const c = (result.commentary ?? {}) as { opening?: { name: string }; yourMove?: { quality?: string; betterWas?: string }; alerts?: string[] };
+  if (typeof result.gameOverText === "string" && result.gameOverText) return `${reply} ${result.gameOverText}`;
+  if (chattiness === "minimal") return reply;
+  if (c.alerts?.length) return `${reply} Careful, ${c.alerts[0]}.`;
+  const q = c.yourMove?.quality;
+  if ((q === "blunder" || q === "mistake") && c.yourMove?.betterWas) return `${reply} That was a ${q}; ${c.yourMove.betterWas} was better.`;
+  if (c.opening?.name) return `${reply} This is the ${c.opening.name}.`;
+  return reply;
+}
+
 function handleLocalTool(name: string, args: Record<string, unknown>, session: Session): { session: Session; data: Record<string, unknown> } {
+  if (name === "ignore") return { session, data: { speech: "", ignored: true } };
+  if (name === "answer") {
+    const reply = typeof args.reply === "string" ? cleanSpeech(args.reply) : "";
+    return { session, data: { speech: reply && !MADE_UP_MOVE.test(reply) ? reply : "Sorry, I'm not sure about that one." } };
+  }
   if (name === "repeat_last") {
     const last = [...session.turns].reverse().find((t) => t.role === "assistant")?.text;
     return { session, data: { speech: last ? `Sure. ${last}` : "I haven't said anything yet!", repeat: true } };
@@ -402,11 +637,17 @@ function handleLocalTool(name: string, args: Record<string, unknown>, session: S
   if (args.speed === "slower") { next.rate = Math.max(75, (session.rate ?? 100) - 15); changes.push("I'll speak more slowly"); }
   if (args.speed === "faster") { next.rate = Math.min(125, (session.rate ?? 100) + 15); changes.push("I'll speak a little faster"); }
   if (args.speed === "normal") { next.rate = 100; changes.push("normal speed again"); }
+  if (typeof args.confirmMoves === "boolean") {
+    next.confirmMoves = args.confirmMoves;
+    changes.push(args.confirmMoves ? "I'll repeat each move and wait for your yes" : "I'll play your moves straight away");
+  }
   return { session: next, data: { speech: changes.length ? `Okay, ${changes.join(", and ")}.` : "Okay." } };
 }
 
 export async function runTurn(deps: AgentDeps, sessionId: string, input: TurnInput | string): Promise<TurnResult> {
-  const { text: rawIn, alternatives = [], chessHeard: rawChess } = typeof input === "string" ? { text: input } : input;
+  const started = Date.now();
+  const timings = { modelMs: 0, toolMs: 0, ttsMs: 0, totalMs: 0, fastPath: false };
+  const { text: rawIn, alternatives = [], chessHeard: rawChess, woken = true } = typeof input === "string" ? ({ text: input } as TurnInput) : input;
   const rawText = typeof rawIn === "string" ? rawIn : ""; // a request without text once crashed stripWakeWord
   const userText = stripWakeWord(rawText) || rawText.trim();
   const heard = [...new Set([userText, ...alternatives.map(stripWakeWord)].filter(Boolean))].slice(0, 5);
@@ -417,19 +658,42 @@ export async function runTurn(deps: AgentDeps, sessionId: string, input: TurnInp
   let session = (await deps.sessions.get(sessionId)) ?? newSession(sessionId);
   const toolCalls: ToolTrace[] = [];
   const usage = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, rounds: 0 };
-  const cache = deps.promptCache !== false;
-  const bedrockTools = toBedrockTools(await deps.tools.listTools());
-  const tools = bedrockTools; // Nova rejects cache points inside toolConfig, so only the system prompt is cached
+  const silent = (): TurnResult => ({
+    ignored: true,
+    reply: "",
+    gameId: session.gameId,
+    gameOver: session.gameOver === true,
+    expectsReply: false,
+    toolCalls,
+    voice: session.voice ?? DEFAULT_VOICE,
+    usage,
+    timings: { ...timings, totalMs: Date.now() - started },
+  });
 
-  // Recognition alternatives help the model read garbled moves; they are not kept in history.
+  // Conversation mode (no "Alexa"): background talk never reaches the model or the board. Speech that is clearly
+  // for Alexa (a move, chess words, an answer to her question) is handled as if she had been called by name.
+  const level = woken ? "yes" : addressedLevel(moveHeard, session);
+  if (level === "no") return silent();
+  const unsure = level === "maybe";
+
+  const cache = deps.promptCache !== false;
+  const allTools = toBedrockTools(await deps.tools.listTools());
+  // "ignore" is offered only when it may be background talk; otherwise garbled words are re-asked (ask_again).
+  // The model over-used ignore for real questions ("am I in check") when it was always offered.
+  const tools = allTools.filter((t) => (unsure ? t.toolSpec?.name !== "ask_again" : t.toolSpec?.name !== "ignore"));
+
+  // Recognition alternatives help the model read garbled words; they are not kept in history.
   const altHint =
     (heard.length > 1 ? `\n(speech recognition alternatives: ${heard.slice(1).map((h) => `"${h}"`).join(", ")})` : "") +
-    (chessHeard ? `\n(chess hearing: "${chessHeard}")` : "");
+    (chessHeard ? `\n(chess hearing: "${chessHeard}")` : "") +
+    (unsure ? "\n(heard without the wake word: call ignore only if this was clearly said to someone else; questions about chess, the game, time or you are for you)" : "");
 
   // "yes" / "the second one" / "c file" after a "Did you mean…?" or "Which rook?" is answered here, not by the model.
+  // The best transcript decides: a lower alternative ("no", an older partial) must not turn "no, knight f3" into a refusal.
+  const answerTo = (h: string) => answerToPending(h, session.pending!.candidates, session.humanColor);
   const pendingAnswer =
     session.pending && session.gameId && !session.gameOver
-      ? heard.map((h) => answerToPending(h, session.pending!.candidates)).find(Boolean)
+      ? answerTo(heard[0] ?? "") ?? (looksLikeMove(heard[0] ?? "") ? undefined : heard.slice(1).map(answerTo).find(Boolean))
       : undefined;
   let forcedMove = "";
   let guessed = false; // we asked twice and still weren't sure: played the likeliest reading
@@ -448,9 +712,18 @@ export async function runTurn(deps: AgentDeps, sessionId: string, input: TurnInp
     reply = "Sorry, I didn't catch that. Could you say it again?";
   }
   let repeated = false;
+  let ignored = false;
+  let templated = false; // a deterministic move reply: already short, never trimmed
+  let direct = false; // a tool's own words spoken as the answer: never trimmed (board read-outs are long)
   const spokenMoves: string[] = []; // this turn's announced moves, protected from dropRepeatedSentences
   let confirmSpeech = ""; // set when make_move needs confirmation: spoken verbatim
   let askChoices = ""; // set when new_game was blocked: we ask ourselves, so the model can't claim a game started
+
+  // "Let's play chess" without colour and level: ask the short fixed question ourselves, no model call.
+  if (!reply && (!session.gameId || session.gameOver) && /\b(play|game|chess|start)\b/i.test(userText) && missingGameChoices(session, userText).length === 2) {
+    reply = choicesQuestion(["colour", "difficulty"]);
+    askChoices = reply;
+  }
 
   const command = chattinessCommand(userText);
   if (command) {
@@ -460,7 +733,185 @@ export async function runTurn(deps: AgentDeps, sessionId: string, input: TurnInp
     toolCalls.push({ name: "set_preferences", args: { chattiness: command }, isError: false, speech: reply });
   }
 
-  for (let round = 0; !reply && round < MAX_ROUNDS; round++) {
+  /** Runs one tool (chess server or agent-local), keeps the session in step, and records the trace. */
+  async function runTool(name: string, rawArgs: Record<string, unknown>): Promise<{ content: Record<string, unknown>; isError: boolean }> {
+    const args = { ...rawArgs };
+    const listRecent = args[LIST_RECENT_FLAG] === true;
+    delete args[LIST_RECENT_FLAG];
+    for (const key of HIDDEN_ARGS) delete args[key];
+    // The model hid the move for "what is the safest move?": only the user's own words may ask for a hidden hint.
+    if (name === "hint" && args.reveal === false && !DONT_REVEAL.test(userText)) args.reveal = true;
+
+    let content: Record<string, unknown>;
+    let isError = false;
+    if (LOCAL_TOOLS.some((t) => t.toolSpec?.name === name)) {
+      const r = handleLocalTool(name, args, session);
+      session = r.session;
+      content = r.data;
+      if (name === "repeat_last") repeated = true;
+      if (name === "ignore") ignored = true;
+    } else {
+      if (name === "new_game") args.sessionId = sessionId;
+      else if (session.gameId && !(name === "game_history" && listRecent)) args.gameId = session.gameId;
+      if (name === "make_move" && moveHeard.length) args.alternatives = moveHeard;
+      if (name === "make_move" && forcedMove) { args.move = forcedMove; args.alternatives = []; } // exact SAN: nothing left to guess
+      else if (name === "make_move" && session.confirmMoves) args.preview = true;
+
+      const missing = name === "new_game" ? missingGameChoices(session, userText) : [];
+      const restartMidGame = name === "new_game" && !!session.gameId && !session.gameOver && !RESTART_WORDS.test(heard.join(" "));
+      // Game-ending and history-changing tools need the words for it: in the eval "Can I resign?" resigned the game
+      // and "Can you redo the move?" took a move back.
+      const unsureResign = name === "resign" && !RESIGN_WORDS.test(userText);
+      const wrongUndo = name === "undo" && /\bredo\b/i.test(userText);
+      if (unsureResign) {
+        isError = true;
+        askChoices = "Do you want to resign this game? Say \"I resign\" to confirm.";
+        content = { speech: askChoices };
+      } else if (wrongUndo) {
+        isError = true;
+        content = { speech: "There's no redo here. Tell the user they can simply play the move again, or say undo to take a move back." };
+      } else if (restartMidGame) {
+        isError = true;
+        content = { speech: "A game is in progress. Only start a new game if the user clearly asks for a new game or a restart; otherwise answer what they actually said." };
+        if (!woken) ignored = true; // overheard words must never wipe out a game
+      } else if (missing.length) {
+        // Models love silent defaults; make sure the user actually chose.
+        isError = true;
+        askChoices = choicesQuestion(missing, `${[...session.turns].reverse().find((t) => t.role === "user")?.text ?? ""} ${userText}`);
+        content = { speech: askChoices };
+      } else if (!session.gameId && name !== "new_game" && name !== "game_history") {
+        isError = true;
+        content = { speech: "There is no game in progress yet. Ask the user if they want to start one, and with which colour and difficulty." };
+      } else {
+        const t = Date.now();
+        let r = await deps.tools.callTool(name, args);
+        // Second question about the same move: stop asking and play the likeliest reading (undo is one word away).
+        const top = Array.isArray(r.data.candidates) ? String(r.data.candidates[0]) : "";
+        if (name === "make_move" && !forcedMove && !r.isError && r.data.needsConfirmation === true && top && session.pending?.candidates.includes(top)) {
+          r = await deps.tools.callTool(name, { ...args, move: top, alternatives: [], preview: false });
+          guessed = true;
+        }
+        timings.toolMs += Date.now() - t;
+        isError = r.isError;
+        content = r.data;
+      }
+    }
+
+    // Track the game this session is playing.
+    if (name === "new_game" && !isError && typeof content.gameId === "string") {
+      session = { ...session, gameId: content.gameId, humanColor: String(content.humanColor), level: Number(content.level), gameOver: false, pending: undefined };
+    } else if (name === "make_move" && !isError) {
+      const asked = content.needsConfirmation === true && Array.isArray(content.candidates);
+      const previewed = content.preview === true && typeof content.san === "string";
+      session = {
+        ...session,
+        gameOver: content.gameOver === true,
+        pending: asked
+          ? { candidates: (content.candidates as unknown[]).map(String), asks: (session.pending?.asks ?? 0) + 1 }
+          : previewed ? { candidates: [String(content.san)], asks: 0 } : undefined,
+      };
+    } else if (name === "set_level" && !isError) {
+      session = { ...session, level: Number(content.level) };
+    } else if ((name === "resign" || (name === "offer_draw" && content.accepted === true)) && !isError) {
+      session = { ...session, gameOver: true };
+    } else if (name === "undo" && !isError) {
+      session = { ...session, gameOver: false, pending: undefined };
+    }
+
+    const traceArgs = { ...args };
+    delete traceArgs.alternatives;
+    toolCalls.push({ name, args: traceArgs, isError, speech: typeof content.speech === "string" ? content.speech : undefined });
+    if ((name === "make_move" || name === "new_game") && !isError) {
+      for (const k of ["yourMoveSpoken", "engineMoveSpoken"]) if (typeof content[k] === "string") spokenMoves.push(content[k] as string);
+    }
+    if (name === "make_move" && !isError && (content.needsConfirmation === true || content.preview === true) && typeof content.speech === "string") {
+      confirmSpeech = content.speech;
+    }
+    return { content, isError };
+  }
+
+  // ---------- fast path: a move needs no model at all ----------
+  // The chess server resolves the spoken move and answers in words; the model only adds personality in chatty
+  // mode. This was ~2 s of the reply time in the 2026-10-16 live game.
+  const chattiness = session.chattiness ?? DEFAULT_CHATTINESS;
+  let startRound = 0;
+  if (!reply && session.gameId && !session.gameOver && (forcedMove || looksLikeMove(...moveHeard))) {
+    timings.fastPath = true;
+    let { content, isError } = await runTool("make_move", { move: forcedMove || moveHeard[0] });
+    // Decide instead of asking: "Did you mean…? Did you mean…?" loops made the live site feel deaf. Unclear words
+    // are played as their best reading ("say undo if not"); a clearly illegal move gets one sentence of why; only a
+    // board question ("Which rook?") is still asked. Asking stays on when the player turned on confirm-each-move.
+    let tookAs = false;
+    const heardSaid = moveHeard[0].replace(/[.!?]+$/, "");
+    const playBest = async (san: string) => {
+      forcedMove = san; // exact SAN: the server plays it without re-reading the words
+      confirmSpeech = "";
+      ({ content, isError } = await runTool("make_move", { move: san }));
+      tookAs = !isError;
+    };
+    if (!isError && content.needsConfirmation === true && !session.confirmMoves && !forcedMove) {
+      const doubt = String(content.doubt ?? "");
+      const candidates = Array.isArray(content.candidates) ? (content.candidates as unknown[]).map(String) : [];
+      if (doubt === "illegal") {
+        const why = typeof content.why === "string" && content.why ? `, ${content.why}` : "";
+        reply = `I heard "${heardSaid}": that isn't possible${why}.`;
+        session = { ...session, pending: undefined };
+        confirmSpeech = "";
+      } else if (doubt !== "which" && candidates.length) {
+        const pick = candidates.length === 1 ? candidates[0] : ((await guessLegalMove(deps, session.gameId!, moveHeard, undefined, timings, usage, candidates))?.san ?? candidates[0]);
+        await playBest(pick);
+      }
+    } else if (isError && !forcedMove) {
+      // Words that named no recognisable move: the model picks the legal move that sounds closest, if any.
+      // A move attempt always gets an answer, wake word or not (silence here made the live site feel deaf).
+      const understood = typeof content.reason === "string" && content.reason; // a real move that just isn't legal
+      const guess = understood ? undefined : await guessLegalMove(deps, session.gameId!, moveHeard, undefined, timings, usage);
+      if (guess) await playBest(guess.san);
+    }
+    if (isError) {
+      reply = typeof content.speech === "string" ? content.speech : "Sorry, I didn't catch a legal move. Could you say it again?";
+    } else if (reply) {
+      // already answered (an illegal move, said once)
+    } else if (confirmSpeech) {
+      reply = confirmSpeech; // a board question, or confirm-each-move
+    } else if (tookAs) {
+      const yours = String(content.yourMoveSpoken ?? "");
+      const quick = quickMoveReply(content, chattiness === "chatty" ? "brief" : chattiness, 0);
+      reply = `Taking "${heardSaid}" as ${yours}; say undo if not.${quick.slice(capitalize(yours).length + 1)}`;
+      templated = true;
+    } else if (chattiness !== "chatty") {
+      reply = quickMoveReply(content, chattiness, session.turns.length);
+      templated = true;
+    } else {
+      // Chatty: one phrasing round, as if the model had called make_move itself.
+      const id = `fast${Date.now()}`;
+      messages.push({ role: "assistant", content: [{ toolUse: { toolUseId: id, name: "make_move", input: { move: forcedMove || moveHeard[0] } } }] });
+      messages.push({ role: "user", content: [{ toolResult: { toolUseId: id, content: [{ text: JSON.stringify(factsForModel("make_move", content, false, chattiness, session.turns.length)) }], status: "success" } }] });
+      startRound = 1;
+    }
+  }
+
+  // ---------- routed questions: the tool is obvious, so the model doesn't have to choose it ----------
+  if (!reply && !ignored && startRound === 0 && !unsure && session.gameId && !session.gameOver) {
+    const route = routeQuestion(userText);
+    if (route) {
+      timings.fastPath = true;
+      const { content, isError } = await runTool(route.name, route.args);
+      if (isError || (DIRECT_SPEECH.has(route.name) && !route.phrase)) {
+        reply = typeof content.speech === "string" ? content.speech : "";
+        direct = true;
+      } else {
+        // One model call to answer the question from the facts.
+        const id = `route${Date.now()}`;
+        messages.push({ role: "assistant", content: [{ toolUse: { toolUseId: id, name: route.name, input: route.args as any } }] });
+        messages.push({ role: "user", content: [{ toolResult: { toolUseId: id, content: [{ text: JSON.stringify(factsForModel(route.name, content, false, chattiness, session.turns.length)) }], status: "success" } }] });
+        startRound = 1;
+      }
+    }
+  }
+
+  for (let round = startRound; !reply && !ignored && round < MAX_ROUNDS; round++) {
+    const t = Date.now();
     const res = await deps.converse({
       modelId: deps.modelId,
       system: cache
@@ -468,17 +919,12 @@ export async function runTurn(deps: AgentDeps, sessionId: string, input: TurnInp
         : [{ text: `${SKILL_BODY}\n\n${sessionState(session)}` }],
       messages,
       // Once a game exists the first round must call a tool: otherwise the model may "play" a move from memory,
-      // or invent analysis of a finished game. ask_again covers garbled speech and small talk.
-      toolConfig: {
-        tools,
-        toolChoice:
-          round === 0 && session.gameId
-            ? !session.gameOver && (forcedMove || looksLikeMove(...moveHeard)) ? { tool: { name: "make_move" } } : { any: {} }
-            : { auto: {} },
-      },
-      // Precise when choosing tools, lively when phrasing the reply.
-      inferenceConfig: { temperature: round === 0 ? 0 : 0.8, maxTokens: 500 },
+      // or invent analysis. `answer` covers rules and general chess knowledge, ask_again / ignore the rest.
+      toolConfig: { tools, toolChoice: round === 0 && (session.gameId || !woken) ? { any: {} } : { auto: {} } },
+      // Precise when choosing tools, a little lively when phrasing the reply.
+      inferenceConfig: { temperature: round === 0 ? 0 : 0.3, maxTokens: 400 }, // 0.6 invented passed pawns and opening traps in the eval
     });
+    timings.modelMs += Date.now() - t;
     usage.rounds++;
     addUsage(usage, res.usage);
     const message = res.output?.message;
@@ -496,81 +942,12 @@ export async function runTurn(deps: AgentDeps, sessionId: string, input: TurnInp
     const results: ContentBlock[] = [];
     for (const { toolUse } of toolUses) {
       const name = toolUse.name!;
-      const args = { ...((toolUse.input as Record<string, unknown>) ?? {}) };
-      const listRecent = args[LIST_RECENT_FLAG] === true;
-      delete args[LIST_RECENT_FLAG];
-      for (const key of HIDDEN_ARGS) delete args[key];
-
-      let content: Record<string, unknown>;
-      let isError = false;
-      if (LOCAL_TOOLS.some((t) => t.toolSpec?.name === name)) {
-        const r = handleLocalTool(name, args, session);
-        session = r.session;
-        content = r.data;
-        if (name === "repeat_last") repeated = true;
-      } else {
-        if (name === "new_game") args.sessionId = sessionId;
-        else if (session.gameId && !(name === "game_history" && listRecent)) args.gameId = session.gameId;
-        if (name === "make_move" && moveHeard.length) args.alternatives = moveHeard;
-        if (name === "make_move" && forcedMove) { args.move = forcedMove; args.alternatives = []; } // exact SAN: nothing left to guess
-
-        const missing = name === "new_game" ? missingGameChoices(session, userText) : [];
-        if (missing.length) {
-          // Models love silent defaults; make sure the user actually chose.
-          isError = true;
-          askChoices = choicesQuestion(missing);
-          content = { speech: askChoices };
-        } else if (!session.gameId && name !== "new_game" && name !== "game_history") {
-          isError = true;
-          content = { speech: "There is no game in progress yet. Ask the user if they want to start one, and with which colour and difficulty." };
-        } else {
-          let r = await deps.tools.callTool(name, args);
-          // Second question about the same move: stop asking and play the likeliest reading (undo is one word away).
-          const top = Array.isArray(r.data.candidates) ? String(r.data.candidates[0]) : "";
-          if (name === "make_move" && !forcedMove && !r.isError && r.data.needsConfirmation === true && top && session.pending?.candidates.includes(top)) {
-            r = await deps.tools.callTool(name, { ...args, move: top, alternatives: [] });
-            guessed = true;
-          }
-          isError = r.isError;
-          content = r.data;
-        }
-      }
-
-      // Track the game this session is playing.
-      if (name === "new_game" && !isError && typeof content.gameId === "string") {
-        session = { ...session, gameId: content.gameId, humanColor: String(content.humanColor), level: Number(content.level), gameOver: false };
-      } else if (name === "make_move" && !isError) {
-        const asked = content.needsConfirmation === true && Array.isArray(content.candidates);
-        session = {
-          ...session,
-          gameOver: content.gameOver === true,
-          pending: asked ? { candidates: (content.candidates as unknown[]).map(String), asks: (session.pending?.asks ?? 0) + 1 } : undefined,
-        };
-      } else if (name === "set_level" && !isError) {
-        session = { ...session, level: Number(content.level) };
-      } else if (name === "resign" && !isError) {
-        session = { ...session, gameOver: true };
-      } else if (name === "undo" && !isError) {
-        session = { ...session, gameOver: false };
-      }
-
-      const traceArgs = { ...args };
-      delete traceArgs.alternatives;
-      toolCalls.push({ name, args: traceArgs, isError, speech: typeof content.speech === "string" ? content.speech : undefined });
-      if ((name === "make_move" || name === "new_game") && !isError) {
-        for (const k of ["yourMoveSpoken", "engineMoveSpoken"]) if (typeof content[k] === "string") spokenMoves.push(content[k] as string);
-      }
-      const forModel = factsForModel(name, content, isError, session.chattiness ?? DEFAULT_CHATTINESS, session.turns.length);
-      if (name === "make_move" && !isError && content.needsConfirmation === true && typeof content.speech === "string") confirmSpeech = content.speech;
-      results.push({
-        toolResult: {
-          toolUseId: toolUse.toolUseId!,
-          content: [{ text: JSON.stringify(forModel) }],
-          status: isError ? "error" : "success",
-        },
-      });
+      const { content, isError } = await runTool(name, (toolUse.input as Record<string, unknown>) ?? {});
+      const forModel = factsForModel(name, content, isError, chattiness, session.turns.length);
+      results.push({ toolResult: { toolUseId: toolUse.toolUseId!, content: [{ text: JSON.stringify(forModel) }], status: isError ? "error" : "success" } });
     }
     messages.push({ role: "user", content: results });
+    if (ignored) break;
 
     // A blocked new_game once came back as "New game started, level 2" with no game behind it,
     // so the user's next move went to their previous game. Ask the missing choice word for word.
@@ -583,13 +960,29 @@ export async function runTurn(deps: AgentDeps, sessionId: string, input: TurnInp
       reply = confirmSpeech;
       break;
     }
-
-    // Preference changes and "repeat that" are answered directly: word for word, and one model call cheaper.
+    // Local tools (preferences, repeat, answer) and board tools whose result is already the exact answer are
+    // spoken word for word: one model call (about a second) cheaper.
     const recent = toolCalls.slice(-toolUses.length);
-    if (toolUses.every(({ toolUse }) => LOCAL_TOOLS.some((t) => t.toolSpec?.name === toolUse.name))) {
-      reply = recent.map((t) => t.speech).filter(Boolean).join(" ");
-      break;
+    // Only on the model's first pick: after a detour through other tools, a bare list of king moves no longer
+    // answers "can my king capture this piece?", so the model phrases it.
+    // A yes/no question ("can my pawn move two squares?") needs a yes or no, not a raw list: the model phrases it,
+    // except for tools that already answer yes/no or name the piece (consider_move, describe_square, hint).
+    const isLocal = (n: string) => LOCAL_TOOLS.some((t) => t.toolSpec?.name === n);
+    const yesNo = YES_NO.test(userText);
+    const speakAsIs = (n: string) => round === 0 && DIRECT_SPEECH.has(n) && (!yesNo || ANSWERS_YES_NO.has(n));
+    if (toolUses.every(({ toolUse }) => isLocal(toolUse.name!) || speakAsIs(toolUse.name!))) {
+      const said = recent.map((t) => t.speech).filter(Boolean).join(" ");
+      if (said) {
+        reply = said;
+        direct = toolUses.every(({ toolUse }) => DIRECT_SPEECH.has(toolUse.name!)); // the model's own answers stay trimmed
+        break;
+      }
     }
+  }
+
+  if (ignored) {
+    await deps.sessions.put(touch(session)); // e.g. a pending question stays pending
+    return silent();
   }
 
   if (!reply) {
@@ -597,13 +990,16 @@ export async function runTurn(deps: AgentDeps, sessionId: string, input: TurnInp
     reply = [...toolCalls].reverse().find((t) => t.speech)?.speech ?? "Sorry, I didn't catch that. Could you say it again?";
   }
 
-  // Conversation turns stay short for the ear; factual read-outs (board, legal moves, repeat) are left whole.
-  if (!repeated && !askChoices && !confirmSpeech) {
+  // Short for the ear. Move turns: the two moves and a remark. Answers: a few sentences, unless they asked for
+  // everything; read-outs (board, legal moves, the move list) stay whole.
+  if (!repeated && !askChoices && !confirmSpeech && !templated && !direct) {
     const done = new Set(toolCalls.filter((t) => !t.isError).map((t) => t.name));
     if (done.has("make_move") || done.has("new_game")) {
       reply = dropRepeatedSentences(reply, session.turns.filter((t) => t.role === "assistant").slice(-4).map((t) => t.text), spokenMoves);
-      reply = limitSentences(reply, SENTENCE_LIMIT[session.chattiness ?? DEFAULT_CHATTINESS]);
-    } else if (done.has("game_history") || done.has("ask_again")) reply = limitSentences(reply, 5);
+      reply = limitSentences(reply, SENTENCE_LIMIT[chattiness]);
+    } else if (!WANTS_DETAIL.test(userText) && !["read_board", "legal_moves", "game_history", "last_moves"].some((n) => done.has(n))) {
+      reply = limitSentences(reply, ANSWER_LIMIT[chattiness]);
+    }
   }
 
   if (guessed && spokenMoves[0] && !confirmSpeech) reply = `I took that as ${spokenMoves[0]}; say undo if that's wrong. ${reply}`;
@@ -612,7 +1008,10 @@ export async function runTurn(deps: AgentDeps, sessionId: string, input: TurnInp
   await deps.sessions.put(touch(session));
 
   const voice = session.voice ?? DEFAULT_VOICE;
+  const t = Date.now();
   const audio = deps.speak ? await deps.speak(reply, voice, session.rate ?? 100) : undefined;
+  timings.ttsMs = Date.now() - t;
+  timings.totalMs = Date.now() - started;
   return {
     reply,
     gameId: session.gameId,
@@ -622,6 +1021,7 @@ export async function runTurn(deps: AgentDeps, sessionId: string, input: TurnInp
     audio,
     voice,
     usage,
+    timings,
   };
 }
 
@@ -639,12 +1039,15 @@ export function missingGameChoices(session: Session, userText: string): string[]
   return missing;
 }
 
-function choicesQuestion(missing: string[]): string {
+function choicesQuestion(missing: string[], said = ""): string {
   const colour = missing.some((m) => m.startsWith("colour"));
   const level = missing.some((m) => m.startsWith("difficulty"));
-  if (colour && level) return "Love to! Would you like white or black, and how tough should I be: easy, medium, hard, or full strength?";
-  if (colour) return "Sure! Would you like to play white or black?";
-  return "Great! And how tough should I be: easy, medium, hard, or full strength?";
+  // Short on purpose: a long list of levels made the user answer over her (2026-10-16 live test).
+  if (colour && level) return "Sure! White or black? And easy, medium or hard?";
+  if (colour) return "Sure! White or black?";
+  // Echo the colour they chose, so "Can I play as Black?" gets a yes before the next question.
+  const picked = /\bblack\b/i.test(said) ? "Black" : /\bwhite\b/i.test(said) ? "White" : "";
+  return `${picked ? `Sure, you'll play ${picked}!` : "Great!"} Easy, medium or hard?`;
 }
 
 function addUsage(total: TurnResult["usage"], u?: TokenUsage) {

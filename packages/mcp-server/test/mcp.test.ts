@@ -1,6 +1,6 @@
 import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { analyse, bestMove, engineMove } from "../src/chess/engine.js";
+import { analyse, bestMove, engineMove, topMoves } from "../src/chess/engine.js";
 import { handleMcpRequest } from "../src/http.js";
 import type { Deps } from "../src/server.js";
 import { MemoryGameStore } from "../src/store.js";
@@ -22,7 +22,7 @@ const call = async (name: string, args: Record<string, unknown> = {}) => {
 
 beforeEach(async () => {
   store = new MemoryGameStore();
-  deps = { store, engine: { move: engineMove, best: bestMove, analyse } };
+  deps = { store, engine: { move: engineMove, best: bestMove, analyse, top: topMoves } };
   client = new Client({ name: "test", version: "1.0.0" });
   const transport = new StreamableHTTPClientTransport(URL_, {
     requestInit: { headers: { authorization: `Bearer ${TOKEN}` } },
@@ -39,7 +39,7 @@ describe("transport and auth", () => {
   it("lists all chess tools", async () => {
     const { tools } = await client.listTools();
     expect(tools.map((t) => t.name).sort()).toEqual(
-      ["describe_square", "game_history", "game_status", "hint", "last_moves", "legal_moves", "list_pieces", "make_move", "new_game", "read_board", "resign", "set_level", "undo"].sort(),
+      ["analyze_position", "consider_move", "describe_square", "game_history", "game_status", "hint", "last_moves", "legal_moves", "list_pieces", "make_move", "new_game", "offer_draw", "read_board", "resign", "review_game", "set_level", "undo"].sort(),
     );
   });
 
@@ -93,7 +93,7 @@ describe("playing a game", () => {
     const game = await call("new_game", { color: "white", level: 1 });
     const bad = await call("make_move", { gameId: game.gameId, move: "Ke2" });
     expect(bad.isError).toBe(true);
-    expect(bad.speech).toContain("isn't a legal move here");
+    expect(bad.speech).toBe("That move isn't possible: e2 is occupied by your own pawn.");
     expect(store.moves.get(game.gameId) ?? []).toHaveLength(0);
   }, 30_000);
 
@@ -106,7 +106,7 @@ describe("playing a game", () => {
     expect((await call("read_board", { gameId: game.gameId })).speech).toContain("It's your move as White.");
     expect((await call("legal_moves", { gameId: game.gameId, piece: "knight" })).moves.length).toBeGreaterThan(0);
     expect((await call("game_status", { gameId: game.gameId })).speech).toMatch(/^Move 2\. It's your move as White\./);
-    expect((await call("hint", { gameId: game.gameId })).speech).toMatch(/^You could try /);
+    expect((await call("hint", { gameId: game.gameId })).speech).toMatch(/^Try /);
 
     const undo = await call("undo", { gameId: game.gameId });
     expect(undo.speech).toContain("Took back pawn to e4");
@@ -181,4 +181,89 @@ describe("conversation features", () => {
     expect(r).toMatchObject({ level: 6, previousLevel: 3, direction: "stronger" });
     expect(store.games.get(game.gameId)!.level).toBe(6);
   });
+});
+
+describe("questions about the position", () => {
+  const scriptEngine = (...replies: string[]) => {
+    deps.engine = { ...deps.engine, move: async () => replies.shift() ?? (await engineMove([], 1)) };
+  };
+
+  it("finds a fork and a mate in one, with best moves and my threat", async () => {
+    const fork = await call("new_game", { color: "white", level: 1, fen: "r3k3/8/8/1N6/8/8/8/4K3 w - - 0 1" });
+    const a = await call("analyze_position", { gameId: fork.gameId });
+    expect(a.isError).toBe(false);
+    expect(a.tactics.forks[0]).toMatchObject({ san: "Nc7+", targets: expect.arrayContaining(["king", "rook on a8"]) });
+    expect(a.bestMoves[0].san).toBe("Nc7+");
+    expect(a.toMove).toBe("you");
+
+    // In check: every way out is listed by kind (the model once said the king had no escape when Ke2 was legal).
+    const check = await call("new_game", { color: "white", level: 1, setupMoves: ["e4", "e5", "f3", "Qh4+"] });
+    const c = await call("analyze_position", { gameId: check.gameId });
+    expect(c.youAreInCheck).toBe(true);
+    expect(c.waysOutOfCheck).toEqual({ kingMoves: ["king to e2"], captureTheChecker: [], blocks: ["pawn to g3"], checkedBy: ["my queen on h4"] });
+
+    const mate = await call("new_game", { color: "white", level: 1, fen: "6k1/5ppp/8/8/8/8/8/R5K1 w - - 0 1" });
+    const m = await call("analyze_position", { gameId: mate.gameId });
+    expect(m.tactics.mateInOne).toContain("rook to a8, checkmate");
+    expect(m.evaluation.mateIn).toBe(1);
+    expect(m.evaluation.says).toBe("you have a forced mate in 1");
+  }, 30_000);
+
+  it("explains illegal moves: pins, attacked squares, blocked pieces, castling", async () => {
+    const pin = await call("new_game", { color: "white", level: 1, fen: "4k3/8/8/8/1b6/8/3N4/4K3 w - - 0 1" });
+    const p = await call("consider_move", { gameId: pin.gameId, move: "knight to f3" });
+    expect(p).toMatchObject({ legal: false });
+    expect(p.reason).toMatch(/pinned to your king by my bishop on b4/);
+
+    const king = await call("new_game", { color: "white", level: 1, fen: "4k3/8/8/8/8/8/4r3/K7 w - - 0 1" });
+    expect((await call("consider_move", { gameId: king.gameId, move: "king to b2" })).reason).toMatch(/b2 is attacked by my rook on e2/);
+
+    const start = await call("new_game", { color: "white", level: 1 });
+    expect((await call("consider_move", { gameId: start.gameId, move: "castle kingside" })).reason).toMatch(/bishop on f1 and knight on g1/);
+    expect((await call("consider_move", { gameId: start.gameId, move: "bishop to c4" })).reason).toMatch(/blocked by your pawn on e2/);
+    const ok = await call("consider_move", { gameId: start.gameId, move: "pawn e4" });
+    expect(ok).toMatchObject({ legal: true, san: "e4" });
+    expect(ok.myBestReply).toBeTruthy();
+    expect(store.moves.get(start.gameId) ?? []).toHaveLength(0); // nothing was played
+    // A piece but no square: where it can go, and which square they mean.
+    const which = await call("consider_move", { gameId: start.gameId, move: "What happens if I move my knight?" });
+    expect(which.speech).toBe("Your knights can play: knight to a3, knight to c3, knight to f3 and knight to h3. Which square do you have in mind?");
+
+    // An illegal move: the reason, then the nearest legal reading as a question.
+    const r = await call("make_move", { gameId: start.gameId, move: "bishop to c4", alternatives: ["bishop to c4"] });
+    // What was heard comes first, so a mishearing is obvious to the player.
+    expect(r.speech).toBe(`I heard "bishop to c4": that isn't possible, your bishop on f1 is blocked by your pawn on e2. Did you mean pawn to c4?`);
+    const nonsense = await call("make_move", { gameId: start.gameId, move: "queen to h8", alternatives: ["queen to h8"] });
+    expect(nonsense.speech).toMatch(/^I heard "queen to h8": that isn't possible, .*queen.*\. Did you mean /);
+    // Live site, 1.d4 e6: "pawn takes e6" (and its mishearing "a 6") must get a reason, not silence.
+    const live = await call("new_game", { color: "white", level: 1, setupMoves: ["d4", "e6"] });
+    const e6 = await call("make_move", { gameId: live.gameId, move: "pawn takes e6", alternatives: ["pawn takes e6"] });
+    expect(e6.speech).toBe(`I heard "pawn takes e6": that isn't possible, none of your pawns can reach e6.`);
+    const a6 = await call("make_move", { gameId: live.gameId, move: "Bw takes a 6.", alternatives: ["Bw takes a 6."] });
+    expect(a6.speech).toBe(`I heard "Bw takes a 6": that isn't possible, there's nothing on a6 to take.`);
+  }, 30_000);
+
+  it("hints: one move by default, three on request, or only the piece", async () => {
+    const g = await call("new_game", { color: "white", level: 1 });
+    const one = await call("hint", { gameId: g.gameId });
+    expect(one.options).toHaveLength(1);
+    expect(one.speech).toMatch(/^Try /);
+    expect((await call("hint", { gameId: g.gameId, count: 3 })).options).toHaveLength(3);
+    const vague = await call("hint", { gameId: g.gameId, reveal: false });
+    expect(vague.speech).toMatch(/^Look at your /);
+    expect(vague.speech).not.toMatch(/[a-h][1-8]/);
+  }, 30_000);
+
+  it("sets up a game from moves, reviews it, and declines an early draw", async () => {
+    scriptEngine("b7a6");
+    const g = await call("new_game", { color: "white", level: 1, setupMoves: ["e4", "e5", "Nf3", "Nc6"] });
+    expect(store.moves.get(g.gameId)).toHaveLength(4);
+    expect((await call("last_moves", { gameId: g.gameId })).speech).toMatch(/knight to f3.*knight to c6/);
+    await call("make_move", { gameId: g.gameId, move: "Ba6" });
+    const review = await call("review_game", { gameId: g.gameId });
+    expect(review.mistakes[0]).toMatchObject({ moveNumber: 3, move: "bishop to a6" });
+    expect(review.biggestMistake.betterWas).toBeTruthy();
+    const draw = await call("offer_draw", { gameId: g.gameId });
+    expect(draw.accepted).toBe(false);
+  }, 60_000);
 });

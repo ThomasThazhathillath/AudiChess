@@ -18,6 +18,27 @@
       "runtimeExecutable": "node",
       "runtimeArgs": ["scripts/serve-web.mjs"],
       "port": 5173
+    },
+    {
+      "name": "mcp-alt",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["run", "dev", "--prefix", "packages/mcp-server"],
+      "env": { "PORT": "3011" },
+      "port": 3011
+    },
+    {
+      "name": "agent-alt",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["run", "dev", "--prefix", "packages/agent"],
+      "env": { "PORT": "3012", "MCP_URL": "http://127.0.0.1:3011/mcp", "MODEL_ID": "global.amazon.nova-2-lite-v1:0" },
+      "port": 3012
+    },
+    {
+      "name": "web-alt",
+      "runtimeExecutable": "node",
+      "runtimeArgs": ["scripts/serve-web.mjs"],
+      "env": { "PORT": "5183", "AGENT_URL": "http://127.0.0.1:3012/" },
+      "port": 5183
     }
   ]
 }

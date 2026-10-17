@@ -40,12 +40,16 @@ const PIECE_WORDS: Record<string, PieceSymbol> = {
   queen: "q", queens: "q", quinn: "q", green: "q", kween: "q",
   king: "k", kings: "k",
   pawn: "p", pawns: "p", pond: "p", porn: "p", paun: "p", prawn: "p", pon: "p", palm: "p", pun: "p", born: "p", upon: "p",
-  poon: "p", pound: "p",
+  poon: "p", pound: "p", worn: "p", warn: "p",
 };
 
 /** A piece fused with the file letter after it ("pondi three" = pawn d3, "bishopi four" = bishop b4). The file only counts before a rank. */
 const PIECE_FILE_WORDS: Record<string, { p: PieceSymbol; f: string }> = {
   pondi: { p: "p", f: "d" }, pondy: { p: "p", f: "d" },
+  // Amazon Transcribe (en-IN) hears a quick "pawn dee four" as "twenty four" and "pawn see four" as "Swansea 4".
+  twenty: { p: "p", f: "d" }, swansea: { p: "p", f: "c" },
+  // "pawn ee" fused into one word, across US and British accents ("Tawny for", "Poorly for" = pawn e4).
+  tawny: { p: "p", f: "e" }, poorly: { p: "p", f: "e" }, pawny: { p: "p", f: "e" }, porny: { p: "p", f: "e" }, pony: { p: "p", f: "e" }, ponny: { p: "p", f: "e" },
   bishopi: { p: "b", f: "b" }, bishopy: { p: "b", f: "b" }, bishopbee: { p: "b", f: "b" },
 };
 
@@ -67,7 +71,12 @@ const FILE_WORDS: Record<string, string> = {
   f: "f", ef: "f", eff: "f", if: "f",
   g: "g", gee: "g", ji: "g", jee: "g", gi: "g",
   h: "h", aitch: "h", age: "h", each: "h", edge: "h", haitch: "h",
+  // Spelled the radio way ("echo four", "knight bravo d2").
+  alpha: "a", alfa: "a", bravo: "b", charlie: "c", delta: "d", echo: "e", foxtrot: "f", golf: "g", hotel: "h",
 };
+const NATO = new Set(["alpha", "alfa", "bravo", "charlie", "delta", "echo", "foxtrot", "golf", "hotel"]);
+/** File names that are never ordinary English, so they can name the file a piece comes from ("knight b d2"). */
+const LETTER_NAMES = new Set([..."abcdefgh", "bee", "cee", "dee", "ee", "ef", "eff", "gee", "jee", "aitch", "haitch", ...NATO]);
 
 /** Rank words. Ambiguous ones ("to", "for", "won") only count right after a file word. */
 const RANK_WORDS: Record<string, string> = {
@@ -99,9 +108,12 @@ export function normalize(text: string): string {
     .replace(/0-0-0|o-o-o/g, " castle queenside ")
     .replace(/0-0|o-o/g, " castle kingside ")
     .replace(/\b(?:wish|which|wich|bish|bitch|fish) (?:up|op|ap)\b/g, "bishop")
-    .replace(/king side/g, "kingside")
-    .replace(/queen side/g, "queenside")
+    // "on the queen's side" arrives as "queens side" once the apostrophe is gone.
+    .replace(/\bkings? side\b/g, "kingside")
+    .replace(/\bqueens? side\b/g, "queenside")
     .replace(/([a-h])\s*-\s*([a-h])/g, "$1 $2")
+    // A spelled letter ("e for elephant", "d as in delta") is one letter: "e for" must not become e4 here.
+    .replace(/\b([a-h]) (?:for|as in|like) (?!(?:one|two|three|four|five|six|seven|eight)\b)[a-z]{3,}\b/g, "$1")
     .replace(/[^a-z0-9=+#\s]/g, " ")
     .replace(/\s+/g, " ")
     .trim();
@@ -138,6 +150,12 @@ export function tokenize(text: string): Token[] {
       out.push({ t: "piece", p: "n" }, { t: "rank", r: ninety[1] });
       continue;
     }
+    // "24" / "25": a quick "pawn dee four" written as a number (Amazon Transcribe en-IN)
+    const twenty = /^2([1-8])$/.exec(w);
+    if (twenty && out.length === 0) {
+      out.push({ t: "piece", p: "p" }, { t: "square", sq: `d${twenty[1]}` });
+      continue;
+    }
     // Fused tokens: "e4", "nf3", "exd5", "g1f3", "e8=q"
     const fused = /^([nbrqk])?([a-h])?(x)?([a-h][1-8])(?:=?([nbrq]))?$/.exec(w);
     if (fused && w.length >= 2) {
@@ -159,9 +177,21 @@ export function tokenize(text: string): Token[] {
       i++;
       continue;
     }
-    if (w in FILE_WORDS && next !== undefined && CAPTURE_WORDS.has(next) && w.length <= 2) {
-      out.push({ t: "file", f: FILE_WORDS[w] }); // "e takes d5"
+    if (w in FILE_WORDS && next !== undefined && CAPTURE_WORDS.has(next) && (w.length <= 2 || NATO.has(w))) {
+      out.push({ t: "file", f: FILE_WORDS[w] }); // "e takes d5", "echo takes delta five"
       continue;
+    }
+    // The file the moving piece comes from, when two can reach the square: "knight b d2", "knight bravo d2",
+    // "the c pawn takes d5" (not "a pawn": that's English), or after the square: "knight to d2 of b", "from the f file".
+    if (LETTER_NAMES.has(w)) {
+      const bare = (s?: string) => (s ?? "").replace(/[+#]+$/, "");
+      const squareNext = next !== undefined && (/^[a-h][1-8]$/.test(bare(next)) || (bare(next) in FILE_WORDS && bare(words[i + 2]) in RANK_WORDS));
+      const beforePiece = w !== "a" && next !== undefined && next in PIECE_WORDS && !out.some((t) => t.t === "piece" || t.t === "capture");
+      const afterSquare = out.some((t) => t.t === "square") && ["of", "from", "the", "on"].includes(words[i - 1] ?? "");
+      if ((out[out.length - 1]?.t === "piece" && squareNext) || beforePiece || afterSquare) {
+        out.push({ t: "file", f: FILE_WORDS[w] });
+        continue;
+      }
     }
     if (w in MOVE_WORDS) { out.push({ t: "piece", p: MOVE_WORDS[w].p }, { t: "square", sq: MOVE_WORDS[w].sq }); continue; }
     if (w in PIECE_FILE_WORDS) {
@@ -208,7 +238,8 @@ interface MoveSpec {
   /** "takes the knight": the piece taken, when it is named after the capture word. */
   captured?: PieceSymbol;
   promotion?: PieceSymbol;
-  castle?: "k" | "q";
+  /** "any": "castle" with no side named; asked about when both sides are legal. */
+  castle?: "k" | "q" | "any";
 }
 
 export function toSpec(tokens: Token[]): MoveSpec | undefined {
@@ -216,7 +247,7 @@ export function toSpec(tokens: Token[]): MoveSpec | undefined {
   const squares: string[] = [];
   const castleTok = tokens.find((t) => t.t === "castle");
   if (castleTok) {
-    const side = tokens.find((t): t is Extract<Token, { t: "side" }> => t.t === "side")?.side ?? "k";
+    const side = tokens.find((t): t is Extract<Token, { t: "side" }> => t.t === "side")?.side ?? "any";
     return { castle: side };
   }
   let promoteNext = false;
@@ -253,7 +284,7 @@ export function toSpec(tokens: Token[]): MoveSpec | undefined {
 
 export function matchSpec(chess: Chess, spec: MoveSpec): Move[] {
   const legal = chess.moves({ verbose: true });
-  if (spec.castle) return legal.filter((m) => m.flags.includes(spec.castle === "k" ? "k" : "q") && m.piece === "k");
+  if (spec.castle) return legal.filter((m) => m.piece === "k" && (spec.castle === "any" ? /[kq]/.test(m.flags) : m.flags.includes(spec.castle!)));
   let pool = spec.to ? legal.filter((m) => m.to === spec.to) : spec.toRank ? legal.filter((m) => m.to[1] === spec.toRank) : legal;
   if (spec.captured) pool = pool.filter((m) => m.captured === spec.captured);
   if (spec.from) pool = pool.filter((m) => m.from === spec.from);
@@ -293,9 +324,9 @@ export function readSpecs(text: string): MoveSpec[] {
   return specs;
 }
 
-/** Central destinations first, so a two-way question offers the likelier moves. */
+/** Central destinations first, so a two-way question offers the likelier moves (kingside castling before queenside). */
 function byCentre(moves: Move[]): Move[] {
-  const off = (m: Move) => Math.abs(m.to.charCodeAt(0) - "d".charCodeAt(0) - 0.5);
+  const off = (m: Move) => (m.flags.includes("k") ? -1 : Math.abs(m.to.charCodeAt(0) - "d".charCodeAt(0) - 0.5));
   return [...moves].sort((a, b) => off(a) - off(b) || a.san.localeCompare(b.san));
 }
 
@@ -440,7 +471,81 @@ const CONFIRM_MIN = 0.45;
  * @param move  the assistant's own reading of the move (SAN/UCI or words), may be empty
  * @param heard raw speech-recognition alternatives, best first
  */
+// ---------- accents: sound-alike letters and numbers ----------
+
+/** File letters that speech recognition confuses across accents ("a 6" for e6, "S3" for f3, "v" for b or d). */
+const FILE_SWAPS: Record<string, string[]> = {
+  a: ["e"], e: ["a"], i: ["e"], b: ["d"], d: ["b"], v: ["b", "d"], p: ["b", "d"], t: ["d"], s: ["f", "c"], z: ["c"], j: ["g"], x: ["e"],
+};
+/** Letters spelled out with a word ("E for elephant", "echo", "delta"). */
+const SPELLED: Record<string, string> = {
+  elephant: "e", echo: "e", egg: "e", apple: "a", alpha: "a", ant: "a", ball: "b", boy: "b", bravo: "b", cat: "c", charlie: "c",
+  dog: "d", delta: "d", fox: "f", foxtrot: "f", frank: "f", golf: "g", goat: "g", hotel: "h", hat: "h",
+};
+/** Rank words as different accents come out of recognition. */
+const RANK_ALIASES: Record<string, string> = {
+  sex: "six", sax: "six", sikh: "six", sick: "six", seeks: "six", sects: "six", fix: "six", sax6: "six",
+  ate: "eight", eat: "eight", tree: "three", free: "three", fore: "four", far: "four", won: "one", fife: "five", hive: "five",
+};
+
+/**
+ * Other ways the same words might have been meant, for when nothing legal matched as heard: spelled letters
+ * ("e for elephant 6"), rank words ("takes sex" = takes six) and confusable file letters (a/e, b/d, s→f...).
+ */
+/** The swaps seen most in real recognition ("a 6" for e6, "S3" for f3): strong enough to override an illegal reading. */
+const STRONG_SWAPS: Record<string, string[]> = { a: ["e"], e: ["a"], s: ["f"] };
+
+export function accentVariants(text: string, strongOnly = false): string[] {
+  const base = text
+    .toLowerCase()
+    .replace(/[^a-z0-9 ]+/g, " ")
+    .replace(/\b([a-h]) (?:for|as in|like) [a-z]+\b/g, "$1")
+    .split(/\s+/)
+    .filter(Boolean)
+    .map((w) => SPELLED[w] ?? RANK_ALIASES[w] ?? w);
+  const out = new Set<string>([base.join(" ")]);
+  base.forEach((w, i) => {
+    const fused = /^([a-z])([1-8])$/.exec(w);
+    const letter = fused ? fused[1] : w.length === 1 ? w : undefined;
+    const rankNext = fused || (i + 1 < base.length && /^([1-8]|one|two|three|four|five|six|seven|eight)$/.test(base[i + 1]));
+    if (!letter || !rankNext) return;
+    for (const swap of (strongOnly ? STRONG_SWAPS : FILE_SWAPS)[letter] ?? []) {
+      const copy = [...base];
+      copy[i] = fused ? `${swap}${fused[2]}` : swap;
+      out.add(copy.join(" "));
+    }
+  });
+  out.delete(text.toLowerCase().replace(/[^a-z0-9 ]+/g, " ").replace(/\s+/g, " ").trim());
+  return [...out].slice(0, 12);
+}
+
 export function resolveSpokenMove(chess: Chess, move: string | undefined, heard: string[] = []): Resolution {
+  const first = resolveAsHeard(chess, move, heard);
+  if (first.kind === "move") return first;
+  // Not sure as heard: try how other accents' letters and numbers come out. Those readings come first (a spelled
+  // "foxtrot" is strong evidence), and the player is asked, never auto-played.
+  const found: string[] = [];
+  // An understood but illegal move ("porn pics D4" where no pawn reaches d4) only yields to the strong swaps: a weak
+  // b/d swap would turn it into a different legal move (b4) the player never said.
+  const strongOnly = first.kind === "confirm" && first.reason === "illegal";
+  for (const text of [...new Set(heard.map((h) => h.trim()).filter(Boolean))].slice(0, 3)) {
+    for (const variant of accentVariants(text, strongOnly)) {
+      const r = resolveAsHeard(chess, undefined, [variant]);
+      if (r.kind === "move" && !found.includes(r.san)) found.push(r.san);
+    }
+  }
+  if (found.length === 0) return first;
+  if (first.kind === "none") return { kind: "confirm", candidates: found.slice(0, 2), heard: first.heard, reason: found.length > 1 ? "ambiguous" : "unclear" };
+  // A board question ("Which rook: the one on c7, or the one on e1?") stays as it is: the words can't settle it.
+  const moves = first.candidates.map((s) => new Chess(chess.fen()).move(s));
+  const whichPiece = moves.length === 2 && moves[0].piece === moves[1].piece && moves[0].to === moves[1].to;
+  if (whichPiece || isCastleChoice(moves)) return first;
+  // Otherwise an accent reading that is a clear legal move beats a vaguer sound-alike guess.
+  const candidates = [...found, ...first.candidates].filter((s, i, all) => all.indexOf(s) === i).slice(0, 2);
+  return { kind: "confirm", candidates, heard: first.heard, reason: "unclear" };
+}
+
+function resolveAsHeard(chess: Chess, move: string | undefined, heard: string[] = []): Resolution {
   const alternatives = [...new Set(heard.map((h) => h.trim()).filter(Boolean))].slice(0, 5);
   const modelMove = move?.trim() ? trySan(chess, move.trim()) : undefined;
   const heardLabel = alternatives[0];
@@ -465,7 +570,9 @@ export function resolveSpokenMove(chess: Chess, move: string | undefined, heard:
       const spec = specs[perSpec.findIndex((ms) => ms.length > 0)];
       const bareSquare = !spec.castle && !spec.piece && !spec.from && !spec.captured && matches[0].piece !== "p";
       if (bareSquare || spec !== specs[0]) unsure.add(matches[0].san);
-      else weights.set(matches[0].san, (weights.get(matches[0].san) ?? 0) + (1 - i * 0.2));
+      // The best-ranked transcript that names a move speaks for it: lower alternatives (older partials, n-best
+      // runners-up) can't outvote it by agreeing with each other ("knight f3" final, two "knight c3" partials).
+      else weights.set(matches[0].san, Math.max(weights.get(matches[0].san) ?? 0, 1 - i * 0.2));
     } else if (matches.length > 1) matches.forEach((m) => unsure.add(m.san));
     else {
       const from = movesFrom(chess, specs[0]);
@@ -514,15 +621,27 @@ export function resolveSpokenMove(chess: Chess, move: string | undefined, heard:
   return { kind: "confirm", candidates: close, heard: heardLabel, reason: saidIllegalMove ? "illegal" : close.length > 1 ? "ambiguous" : "unclear" };
 }
 
+/** Both castles offered for a bare "castle": a board question the words can't settle. */
+export function isCastleChoice(moves: Move[]): boolean {
+  return moves.length === 2 && moves.every((m) => m.piece === "k" && /[kq]/.test(m.flags)) && moves[0].flags !== moves[1].flags;
+}
+
 /** "Did you mean knight to e4, or knight to f4?" */
-export function confirmQuestion(chess: Chess, r: Extract<Resolution, { kind: "confirm" }>): string {
+export function confirmQuestion(chess: Chess, r: Extract<Resolution, { kind: "confirm" }>, why?: string): string {
   const moves = r.candidates.map((san) => new Chess(chess.fen()).move(san));
+  if (isCastleChoice(moves)) return "Castle which way: kingside, or queenside?";
   // Same piece, same destination: only the starting square differs, so ask exactly that.
   if (moves.length === 2 && moves[0].piece === moves[1].piece && moves[0].to === moves[1].to && moves[0].from !== moves[1].from) {
     const name = PIECE_SPOKEN[moves[0].piece];
     return `Which ${name}: the one on ${moves[0].from}, or the one on ${moves[1].from}?`;
   }
   const spoken = moves.map((m) => spokenMove(m));
-  const lead = r.reason === "illegal" ? "That move isn't possible here." : r.heard ? `I heard "${r.heard}".` : "I'm not sure I caught that.";
+  const heard = r.heard?.trim().replace(/[.!?]+$/, "");
+  const lead =
+    r.reason === "illegal"
+      ? heard && heard.split(/\s+/).length <= 8 && !/^(?:[KQRBN]?[a-h]?[1-8]?x?[a-h][1-8](?:=[QRBN])?|O-O(?:-O)?)[+#]?$/.test(heard)
+        ? `I heard "${heard}": that isn't possible${why ? `, ${why}` : " here"}.`
+        : `That move isn't possible${why ? `: ${why}` : " here"}.`
+      : heard ? `I heard "${heard}".` : "I'm not sure I caught that.";
   return spoken.length > 1 ? `${lead} Did you mean ${spoken[0]}, or ${spoken[1]}?` : `${lead} Did you mean ${spoken[0]}?`;
 }

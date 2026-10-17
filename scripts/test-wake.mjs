@@ -4,24 +4,59 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 
 new Function(readFileSync(new URL("../web/wake.js", import.meta.url), "utf8"))();
-const { decide, afterWake, followUpMs, FOLLOW_UP } = globalThis.AlexaWake;
+const { decide, afterWake, followUpMs, FOLLOW_UP, bargeIn, isOnlyStop, endpointMs } = globalThis.AlexaWake;
 
+// woken: "Alexa" was said (in the utterance or just before it); false in the conversation-mode window.
 const closed = { now: 1000, awakeUntil: 0, followUpUntil: 0 };
 const cases = [
-  [["Alexa, knight to f3"], closed, { action: "send", text: "knight to f3", alternatives: ["knight to f3"] }],
-  [["alexa night forever", "Alexa knight e4"], closed, { action: "send", text: "night forever", alternatives: ["night forever", "knight e4"] }],
-  [["Alexia let's play chess"], closed, { action: "send", text: "let's play chess", alternatives: ["let's play chess"] }],
+  [["Alexa, knight to f3"], closed, { action: "send", text: "knight to f3", alternatives: ["knight to f3"], woken: true }],
+  [["alexa night forever", "Alexa knight e4"], closed, { action: "send", text: "night forever", alternatives: ["night forever", "knight e4"], woken: true }],
+  [["Alexia let's play chess"], closed, { action: "send", text: "let's play chess", alternatives: ["let's play chess"], woken: true }],
   [["hey Alexa"], closed, { action: "awake" }],
   [["Alexa"], closed, { action: "awake" }],
   [["pass the salt"], closed, { action: "ignore" }],
-  [["knight f3"], { now: 1000, awakeUntil: 5000, followUpUntil: 0 }, { action: "send", text: "knight f3", alternatives: ["knight f3"] }],
-  [["black please", "black peas"], { now: 1000, awakeUntil: 0, followUpUntil: 3000 }, { action: "send", text: "black please", alternatives: ["black please", "black peas"] }],
+  [["knight f3"], { now: 1000, awakeUntil: 5000, followUpUntil: 0 }, { action: "send", text: "knight f3", alternatives: ["knight f3"], woken: true }],
+  [["black please", "black peas"], { now: 1000, awakeUntil: 0, followUpUntil: 3000 }, { action: "send", text: "black please", alternatives: ["black please", "black peas"], woken: false }],
   [["knight f3"], { now: 9000, awakeUntil: 5000, followUpUntil: 8000 }, { action: "ignore" }],
   [[" ", ""], closed, { action: "ignore" }],
   // "easy" started inside the window but Chrome finalised it after the window closed: still counts.
-  [["easy"], { now: 9000, awakeUntil: 0, followUpUntil: 8000, speechAt: 7500 }, { action: "send", text: "easy", alternatives: ["easy"] }],
+  [["easy"], { now: 9000, awakeUntil: 0, followUpUntil: 8000, speechAt: 7500 }, { action: "send", text: "easy", alternatives: ["easy"], woken: false }],
   [["easy"], { now: 9000, awakeUntil: 0, followUpUntil: 8000, speechAt: 8500 }, { action: "ignore" }],
 ];
+
+// Barge-in while Alexa talks: her name or a stop word interrupts; her own voice leaking into the mic does not.
+const saying = "Knight to f3. I play pawn to d5, and your bishop on c4 is under attack.";
+assert.equal(bargeIn("stop", saying), "stop");
+assert.equal(bargeIn("okay stop", saying), "stop");
+assert.equal(bargeIn("Alexa", saying), "command");
+assert.equal(bargeIn("Alexa what is", saying), "command");
+assert.equal(bargeIn("I play pawn to d5", saying), null); // echo of her own words
+assert.equal(bargeIn("your bishop on c4", saying), null);
+assert.equal(bargeIn("wait", "Wait for it: knight takes d5."), null); // she said "wait" herself
+assert.equal(bargeIn("", saying), null);
+// Answering her question while she still asks it (live test: "black, easy" was lost under a long question).
+const asking = "Sure! White or black? And easy, medium or hard?";
+assert.equal(bargeIn("black, easy", asking, true), "answer");
+assert.equal(bargeIn("Yes", "Did you mean knight to f3?", true), "answer");
+assert.equal(bargeIn("white or black", asking, true), null); // her own words, in her order: echo
+assert.equal(bargeIn("black", asking, true), null); // one of her words alone, timing unknown: treat as echo
+assert.equal(bargeIn("black", asking, true, 0.5), null); // heard just as she says it: echo
+assert.equal(bargeIn("black?", asking, true, 0.9), "answer"); // live test: said after she asked "white or black?"
+assert.equal(bargeIn("black, easy", "Knight to f3. I play d5.", false), null); // not a question: no barge-in
+assert.equal(isOnlyStop("Stop."), true);
+assert.equal(isOnlyStop("okay stop"), true);
+assert.equal(isOnlyStop("stop, what is my best move"), false);
+assert.equal(isOnlyStop("knight f3"), false);
+// Our end-of-speech timer: complete-looking commands end fast, a lone word waits for more.
+assert.equal(endpointMs("Knight F3."), 700);
+assert.equal(endpointMs("castle kingside"), 700);
+assert.equal(endpointMs("what is my best move?"), 700);
+assert.equal(endpointMs("yes"), 800);
+assert.equal(endpointMs("Alexa"), 1600);
+assert.equal(endpointMs("let's play"), 1100);
+assert.equal(endpointMs("knight"), 2500); // the square is still coming
+assert.equal(endpointMs("Alexa, castle"), 2500);
+assert.equal(endpointMs("bishop takes"), 2500);
 
 let n = 0;
 for (const [alts, windows, expected] of cases) {
@@ -36,7 +71,23 @@ assert.equal(followUpMs({ expectsReply: true }), FOLLOW_UP.question);
 assert.equal(followUpMs({ expectsReply: false }), FOLLOW_UP.other);
 assert.equal(followUpMs({ gameId: "g1", gameOver: true }), FOLLOW_UP.other);
 assert.equal(followUpMs({ gameId: "g1", error: true }), FOLLOW_UP.other);
-console.log(`wake.js: ${n + 7} checks passed`);
+
+// Open mic (the default): no wake word, every phrase is sent; "Alexa" still works and marks it as woken.
+const open = { now: 1000, awakeUntil: 0, followUpUntil: 0, openMic: true };
+assert.deepEqual(decide(["knight f3", "night f3"], open), { action: "send", text: "knight f3", alternatives: ["knight f3", "night f3"], woken: false });
+assert.deepEqual(decide(["what's my best move"], { ...open, now: 999999 }), { action: "send", text: "what's my best move", alternatives: ["what's my best move"], woken: false });
+assert.deepEqual(decide(["Alexa, knight f3"], open), { action: "send", text: "knight f3", alternatives: ["knight f3"], woken: true });
+assert.deepEqual(decide(["undo"], { ...open, awakeUntil: 5000 }), { action: "send", text: "undo", alternatives: ["undo"], woken: true }); // after a bare "Alexa"
+assert.deepEqual(decide(["  "], open), { action: "ignore" });
+
+// Half a move is held for the rest ("knight…" then "f3"); whole moves and other phrases are not.
+const { incomplete, isSleep } = globalThis.AlexaWake;
+for (const t of ["knight", "Knight.", "my bishop to", "Alexa, rook", "night takes", "move the queen to", "pawn"]) assert.equal(incomplete(t), true, t);
+for (const t of ["knight f3", "castle", "e4", "what's the best move", "queen side", "bishop to c4", "the king is safe"]) assert.equal(incomplete(t), false, t);
+// Voice off switch for the open mic.
+for (const t of ["pause", "Stop listening.", "Alexa, go to sleep", "mute"]) assert.equal(isSleep(t), true, t);
+for (const t of ["stop", "pause the game and tell me the score", "knight f3"]) assert.equal(isSleep(t), false, t);
+console.log(`wake.js: ${n + 35 + 5 + 14 + 7} checks passed`);
 
 // ---------- vosk.js: timeline, hearings, pairing with Chrome ----------
 new Function(readFileSync(new URL("../web/vosk.js", import.meta.url), "utf8"))();

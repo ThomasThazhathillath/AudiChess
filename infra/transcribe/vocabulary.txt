@@ -1,0 +1,560 @@
+Phrase	SoundsLike	IPA	DisplayAs
+alexa			Alexa
+pawn			
+knight			
+bishop			
+rook			
+queen			
+king			
+takes			
+castle			
+castles			
+castling			
+kingside			
+queenside			
+promote			
+promotes			
+check			
+checkmate			
+resign			
+undo			
+stalemate			
+draw			
+en-passant			en passant
+king-side			kingside
+queen-side			queenside
+chess			
+black			
+white			
+easy			
+medium			
+hard			
+beginner			
+expert			
+grandmaster			
+random			
+level			
+difficulty			
+new-game			
+play			
+board			
+rematch			
+aur			
+haan			
+nahi			
+acha			
+theek			
+chalo			
+bas			
+a-one			a1
+a-two			a2
+a-three			a3
+a-four			a4
+a-five			a5
+a-six			a6
+a-seven			a7
+a-eight			a8
+b-one			b1
+b-two			b2
+b-three			b3
+b-four			b4
+b-five			b5
+b-six			b6
+b-seven			b7
+b-eight			b8
+c-one			c1
+c-two			c2
+c-three			c3
+c-four			c4
+c-five			c5
+c-six			c6
+c-seven			c7
+c-eight			c8
+d-one			d1
+d-two			d2
+d-three			d3
+d-four			d4
+d-five			d5
+d-six			d6
+d-seven			d7
+d-eight			d8
+e-one			e1
+e-two			e2
+e-three			e3
+e-four			e4
+e-five			e5
+e-six			e6
+e-seven			e7
+e-eight			e8
+f-one			f1
+f-two			f2
+f-three			f3
+f-four			f4
+f-five			f5
+f-six			f6
+f-seven			f7
+f-eight			f8
+g-one			g1
+g-two			g2
+g-three			g3
+g-four			g4
+g-five			g5
+g-six			g6
+g-seven			g7
+g-eight			g8
+h-one			h1
+h-two			h2
+h-three			h3
+h-four			h4
+h-five			h5
+h-six			h6
+h-seven			h7
+h-eight			h8
+takes-a-one			takes a1
+takes-a-two			takes a2
+takes-a-three			takes a3
+takes-a-four			takes a4
+takes-a-five			takes a5
+takes-a-six			takes a6
+takes-a-seven			takes a7
+takes-a-eight			takes a8
+takes-b-one			takes b1
+takes-b-two			takes b2
+takes-b-three			takes b3
+takes-b-four			takes b4
+takes-b-five			takes b5
+takes-b-six			takes b6
+takes-b-seven			takes b7
+takes-b-eight			takes b8
+takes-c-one			takes c1
+takes-c-two			takes c2
+takes-c-three			takes c3
+takes-c-four			takes c4
+takes-c-five			takes c5
+takes-c-six			takes c6
+takes-c-seven			takes c7
+takes-c-eight			takes c8
+takes-d-one			takes d1
+takes-d-two			takes d2
+takes-d-three			takes d3
+takes-d-four			takes d4
+takes-d-five			takes d5
+takes-d-six			takes d6
+takes-d-seven			takes d7
+takes-d-eight			takes d8
+takes-e-one			takes e1
+takes-e-two			takes e2
+takes-e-three			takes e3
+takes-e-four			takes e4
+takes-e-five			takes e5
+takes-e-six			takes e6
+takes-e-seven			takes e7
+takes-e-eight			takes e8
+takes-f-one			takes f1
+takes-f-two			takes f2
+takes-f-three			takes f3
+takes-f-four			takes f4
+takes-f-five			takes f5
+takes-f-six			takes f6
+takes-f-seven			takes f7
+takes-f-eight			takes f8
+takes-g-one			takes g1
+takes-g-two			takes g2
+takes-g-three			takes g3
+takes-g-four			takes g4
+takes-g-five			takes g5
+takes-g-six			takes g6
+takes-g-seven			takes g7
+takes-g-eight			takes g8
+takes-h-one			takes h1
+takes-h-two			takes h2
+takes-h-three			takes h3
+takes-h-four			takes h4
+takes-h-five			takes h5
+takes-h-six			takes h6
+takes-h-seven			takes h7
+takes-h-eight			takes h8
+pawn-a-one			pawn a1
+pawn-a-two			pawn a2
+pawn-a-three			pawn a3
+pawn-a-four			pawn a4
+pawn-a-five			pawn a5
+pawn-a-six			pawn a6
+pawn-a-seven			pawn a7
+pawn-a-eight			pawn a8
+pawn-b-one			pawn b1
+pawn-b-two			pawn b2
+pawn-b-three			pawn b3
+pawn-b-four			pawn b4
+pawn-b-five			pawn b5
+pawn-b-six			pawn b6
+pawn-b-seven			pawn b7
+pawn-b-eight			pawn b8
+pawn-c-one			pawn c1
+pawn-c-two			pawn c2
+pawn-c-three			pawn c3
+pawn-c-four			pawn c4
+pawn-c-five			pawn c5
+pawn-c-six			pawn c6
+pawn-c-seven			pawn c7
+pawn-c-eight			pawn c8
+pawn-d-one			pawn d1
+pawn-d-two			pawn d2
+pawn-d-three			pawn d3
+pawn-d-four			pawn d4
+pawn-d-five			pawn d5
+pawn-d-six			pawn d6
+pawn-d-seven			pawn d7
+pawn-d-eight			pawn d8
+pawn-e-one			pawn e1
+pawn-e-two			pawn e2
+pawn-e-three			pawn e3
+pawn-e-four			pawn e4
+pawn-e-five			pawn e5
+pawn-e-six			pawn e6
+pawn-e-seven			pawn e7
+pawn-e-eight			pawn e8
+pawn-f-one			pawn f1
+pawn-f-two			pawn f2
+pawn-f-three			pawn f3
+pawn-f-four			pawn f4
+pawn-f-five			pawn f5
+pawn-f-six			pawn f6
+pawn-f-seven			pawn f7
+pawn-f-eight			pawn f8
+pawn-g-one			pawn g1
+pawn-g-two			pawn g2
+pawn-g-three			pawn g3
+pawn-g-four			pawn g4
+pawn-g-five			pawn g5
+pawn-g-six			pawn g6
+pawn-g-seven			pawn g7
+pawn-g-eight			pawn g8
+pawn-h-one			pawn h1
+pawn-h-two			pawn h2
+pawn-h-three			pawn h3
+pawn-h-four			pawn h4
+pawn-h-five			pawn h5
+pawn-h-six			pawn h6
+pawn-h-seven			pawn h7
+pawn-h-eight			pawn h8
+knight-a-one			knight a1
+knight-a-two			knight a2
+knight-a-three			knight a3
+knight-a-four			knight a4
+knight-a-five			knight a5
+knight-a-six			knight a6
+knight-a-seven			knight a7
+knight-a-eight			knight a8
+knight-b-one			knight b1
+knight-b-two			knight b2
+knight-b-three			knight b3
+knight-b-four			knight b4
+knight-b-five			knight b5
+knight-b-six			knight b6
+knight-b-seven			knight b7
+knight-b-eight			knight b8
+knight-c-one			knight c1
+knight-c-two			knight c2
+knight-c-three			knight c3
+knight-c-four			knight c4
+knight-c-five			knight c5
+knight-c-six			knight c6
+knight-c-seven			knight c7
+knight-c-eight			knight c8
+knight-d-one			knight d1
+knight-d-two			knight d2
+knight-d-three			knight d3
+knight-d-four			knight d4
+knight-d-five			knight d5
+knight-d-six			knight d6
+knight-d-seven			knight d7
+knight-d-eight			knight d8
+knight-e-one			knight e1
+knight-e-two			knight e2
+knight-e-three			knight e3
+knight-e-four			knight e4
+knight-e-five			knight e5
+knight-e-six			knight e6
+knight-e-seven			knight e7
+knight-e-eight			knight e8
+knight-f-one			knight f1
+knight-f-two			knight f2
+knight-f-three			knight f3
+knight-f-four			knight f4
+knight-f-five			knight f5
+knight-f-six			knight f6
+knight-f-seven			knight f7
+knight-f-eight			knight f8
+knight-g-one			knight g1
+knight-g-two			knight g2
+knight-g-three			knight g3
+knight-g-four			knight g4
+knight-g-five			knight g5
+knight-g-six			knight g6
+knight-g-seven			knight g7
+knight-g-eight			knight g8
+knight-h-one			knight h1
+knight-h-two			knight h2
+knight-h-three			knight h3
+knight-h-four			knight h4
+knight-h-five			knight h5
+knight-h-six			knight h6
+knight-h-seven			knight h7
+knight-h-eight			knight h8
+bishop-a-one			bishop a1
+bishop-a-two			bishop a2
+bishop-a-three			bishop a3
+bishop-a-four			bishop a4
+bishop-a-five			bishop a5
+bishop-a-six			bishop a6
+bishop-a-seven			bishop a7
+bishop-a-eight			bishop a8
+bishop-b-one			bishop b1
+bishop-b-two			bishop b2
+bishop-b-three			bishop b3
+bishop-b-four			bishop b4
+bishop-b-five			bishop b5
+bishop-b-six			bishop b6
+bishop-b-seven			bishop b7
+bishop-b-eight			bishop b8
+bishop-c-one			bishop c1
+bishop-c-two			bishop c2
+bishop-c-three			bishop c3
+bishop-c-four			bishop c4
+bishop-c-five			bishop c5
+bishop-c-six			bishop c6
+bishop-c-seven			bishop c7
+bishop-c-eight			bishop c8
+bishop-d-one			bishop d1
+bishop-d-two			bishop d2
+bishop-d-three			bishop d3
+bishop-d-four			bishop d4
+bishop-d-five			bishop d5
+bishop-d-six			bishop d6
+bishop-d-seven			bishop d7
+bishop-d-eight			bishop d8
+bishop-e-one			bishop e1
+bishop-e-two			bishop e2
+bishop-e-three			bishop e3
+bishop-e-four			bishop e4
+bishop-e-five			bishop e5
+bishop-e-six			bishop e6
+bishop-e-seven			bishop e7
+bishop-e-eight			bishop e8
+bishop-f-one			bishop f1
+bishop-f-two			bishop f2
+bishop-f-three			bishop f3
+bishop-f-four			bishop f4
+bishop-f-five			bishop f5
+bishop-f-six			bishop f6
+bishop-f-seven			bishop f7
+bishop-f-eight			bishop f8
+bishop-g-one			bishop g1
+bishop-g-two			bishop g2
+bishop-g-three			bishop g3
+bishop-g-four			bishop g4
+bishop-g-five			bishop g5
+bishop-g-six			bishop g6
+bishop-g-seven			bishop g7
+bishop-g-eight			bishop g8
+bishop-h-one			bishop h1
+bishop-h-two			bishop h2
+bishop-h-three			bishop h3
+bishop-h-four			bishop h4
+bishop-h-five			bishop h5
+bishop-h-six			bishop h6
+bishop-h-seven			bishop h7
+bishop-h-eight			bishop h8
+rook-a-one			rook a1
+rook-a-two			rook a2
+rook-a-three			rook a3
+rook-a-four			rook a4
+rook-a-five			rook a5
+rook-a-six			rook a6
+rook-a-seven			rook a7
+rook-a-eight			rook a8
+rook-b-one			rook b1
+rook-b-two			rook b2
+rook-b-three			rook b3
+rook-b-four			rook b4
+rook-b-five			rook b5
+rook-b-six			rook b6
+rook-b-seven			rook b7
+rook-b-eight			rook b8
+rook-c-one			rook c1
+rook-c-two			rook c2
+rook-c-three			rook c3
+rook-c-four			rook c4
+rook-c-five			rook c5
+rook-c-six			rook c6
+rook-c-seven			rook c7
+rook-c-eight			rook c8
+rook-d-one			rook d1
+rook-d-two			rook d2
+rook-d-three			rook d3
+rook-d-four			rook d4
+rook-d-five			rook d5
+rook-d-six			rook d6
+rook-d-seven			rook d7
+rook-d-eight			rook d8
+rook-e-one			rook e1
+rook-e-two			rook e2
+rook-e-three			rook e3
+rook-e-four			rook e4
+rook-e-five			rook e5
+rook-e-six			rook e6
+rook-e-seven			rook e7
+rook-e-eight			rook e8
+rook-f-one			rook f1
+rook-f-two			rook f2
+rook-f-three			rook f3
+rook-f-four			rook f4
+rook-f-five			rook f5
+rook-f-six			rook f6
+rook-f-seven			rook f7
+rook-f-eight			rook f8
+rook-g-one			rook g1
+rook-g-two			rook g2
+rook-g-three			rook g3
+rook-g-four			rook g4
+rook-g-five			rook g5
+rook-g-six			rook g6
+rook-g-seven			rook g7
+rook-g-eight			rook g8
+rook-h-one			rook h1
+rook-h-two			rook h2
+rook-h-three			rook h3
+rook-h-four			rook h4
+rook-h-five			rook h5
+rook-h-six			rook h6
+rook-h-seven			rook h7
+rook-h-eight			rook h8
+queen-a-one			queen a1
+queen-a-two			queen a2
+queen-a-three			queen a3
+queen-a-four			queen a4
+queen-a-five			queen a5
+queen-a-six			queen a6
+queen-a-seven			queen a7
+queen-a-eight			queen a8
+queen-b-one			queen b1
+queen-b-two			queen b2
+queen-b-three			queen b3
+queen-b-four			queen b4
+queen-b-five			queen b5
+queen-b-six			queen b6
+queen-b-seven			queen b7
+queen-b-eight			queen b8
+queen-c-one			queen c1
+queen-c-two			queen c2
+queen-c-three			queen c3
+queen-c-four			queen c4
+queen-c-five			queen c5
+queen-c-six			queen c6
+queen-c-seven			queen c7
+queen-c-eight			queen c8
+queen-d-one			queen d1
+queen-d-two			queen d2
+queen-d-three			queen d3
+queen-d-four			queen d4
+queen-d-five			queen d5
+queen-d-six			queen d6
+queen-d-seven			queen d7
+queen-d-eight			queen d8
+queen-e-one			queen e1
+queen-e-two			queen e2
+queen-e-three			queen e3
+queen-e-four			queen e4
+queen-e-five			queen e5
+queen-e-six			queen e6
+queen-e-seven			queen e7
+queen-e-eight			queen e8
+queen-f-one			queen f1
+queen-f-two			queen f2
+queen-f-three			queen f3
+queen-f-four			queen f4
+queen-f-five			queen f5
+queen-f-six			queen f6
+queen-f-seven			queen f7
+queen-f-eight			queen f8
+queen-g-one			queen g1
+queen-g-two			queen g2
+queen-g-three			queen g3
+queen-g-four			queen g4
+queen-g-five			queen g5
+queen-g-six			queen g6
+queen-g-seven			queen g7
+queen-g-eight			queen g8
+queen-h-one			queen h1
+queen-h-two			queen h2
+queen-h-three			queen h3
+queen-h-four			queen h4
+queen-h-five			queen h5
+queen-h-six			queen h6
+queen-h-seven			queen h7
+queen-h-eight			queen h8
+king-a-one			king a1
+king-a-two			king a2
+king-a-three			king a3
+king-a-four			king a4
+king-a-five			king a5
+king-a-six			king a6
+king-a-seven			king a7
+king-a-eight			king a8
+king-b-one			king b1
+king-b-two			king b2
+king-b-three			king b3
+king-b-four			king b4
+king-b-five			king b5
+king-b-six			king b6
+king-b-seven			king b7
+king-b-eight			king b8
+king-c-one			king c1
+king-c-two			king c2
+king-c-three			king c3
+king-c-four			king c4
+king-c-five			king c5
+king-c-six			king c6
+king-c-seven			king c7
+king-c-eight			king c8
+king-d-one			king d1
+king-d-two			king d2
+king-d-three			king d3
+king-d-four			king d4
+king-d-five			king d5
+king-d-six			king d6
+king-d-seven			king d7
+king-d-eight			king d8
+king-e-one			king e1
+king-e-two			king e2
+king-e-three			king e3
+king-e-four			king e4
+king-e-five			king e5
+king-e-six			king e6
+king-e-seven			king e7
+king-e-eight			king e8
+king-f-one			king f1
+king-f-two			king f2
+king-f-three			king f3
+king-f-four			king f4
+king-f-five			king f5
+king-f-six			king f6
+king-f-seven			king f7
+king-f-eight			king f8
+king-g-one			king g1
+king-g-two			king g2
+king-g-three			king g3
+king-g-four			king g4
+king-g-five			king g5
+king-g-six			king g6
+king-g-seven			king g7
+king-g-eight			king g8
+king-h-one			king h1
+king-h-two			king h2
+king-h-three			king h3
+king-h-four			king h4
+king-h-five			king h5
+king-h-six			king h6
+king-h-seven			king h7
+king-h-eight			king h8

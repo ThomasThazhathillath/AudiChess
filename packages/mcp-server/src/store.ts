@@ -19,6 +19,8 @@ export interface GameRecord {
   result?: GameResult;
   reason?: string;
   fen: string;
+  /** Set-up position the game started from (tests, puzzles); absent for the normal start position. */
+  startFen?: string;
   plyCount: number;
   sessionId?: string;
   createdAt: string;
@@ -43,6 +45,8 @@ export interface MoveRecord {
   quality?: "best" | "good" | "inaccuracy" | "mistake" | "blunder";
   /** Human moves: the engine's preferred move when this one was worse. */
   bestSan?: string;
+  /** Human moves: centipawns lost compared with the best move. */
+  lossCp?: number;
   /** Set on the ply where the game first reached this named opening. */
   opening?: string;
 }
