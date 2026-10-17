@@ -145,7 +145,7 @@ Write `template.yaml` with stub handlers, so the whole stack deploys and gets it
 **Tools** (all take `gameId` except `new_game`; every result has a short `speech` string for the voice, plus structured data):
 | Tool | Input | Returns |
 |---|---|---|
-| `new_game` | `color: white\|black\|random`, `level: 1-8` (mapped to Stockfish `UCI_Elo` 1350→2850 and `movetime`) | `gameId`, side, and the engine's first move if you play black |
+| `new_game` | `color: white\|black\|random`, `level: 1-8` (about 500 to full strength; see Phase 8 for how each level plays) | `gameId`, side, and the engine's first move if you play black |
 | `make_move` | `move` (SAN like `Nf3`, or UCI like `g1f3`) | Your move spoken, engine reply spoken, check/mate/draw status. Illegal move gives a clear error plus close legal alternatives. |
 | `legal_moves` | optional `square` or `piece` (e.g. `knight`) | Spoken list, e.g. "Your knights can go to f3, h3, c3" |
 | `describe_square` | `square` | "Black bishop on c5" / "empty" |
@@ -154,7 +154,7 @@ Write `template.yaml` with stub handlers, so the whole stack deploys and gets it
 | `last_moves` | `count` (default 2) | Recent moves in spoken form (read from `alexa_chess_moves`) |
 | `game_history` | optional `gameId` | Full move list (PGN + spoken), status and result. Also lists your recent games when no game is given. |
 | `game_status` | — | Whose turn, material count, check, move number |
-| `hint` | — | Stockfish best move at depth 12, spoken |
+| `hint` | — | The full-strength engine's best move (MultiPV search, 500 ms), spoken as "The best move here, according to the engine, would be …" |
 | `undo` | — | Takes back the last move pair |
 | `resign` | — | Ends the game |
 
@@ -306,7 +306,7 @@ Two facts checked in ap-south-1:
 
 **Colour and level by voice:**
 - "Let's play" with no details gets one question: "Sure! White or black, and how tough should I be: easy, medium, hard, or full strength?"
-- Words map to levels: beginner=1, easy=2, medium=4, hard=6, expert=7, grandmaster/max=8. "Random" and "you pick" also work.
+- Words map to levels: beginner=1, easy=2, casual=3, medium=4, challenging=5, hard=6, expert=7, grandmaster/max=8. "Random" and "you pick" also work.
 - **New MCP tool `set_level`**, for "play harder" or "go easy on me" mid-game. It updates the game, and the change is announced.
 
 ### Milestone 4: Model A/B and cost trim
@@ -627,3 +627,225 @@ Chrome's recognizer in English (US), one phrase at a time, with no wake word and
 - Browser run with a scripted recognizer against the local agent, MCP server, Bedrock and Polly: open-mic start, silence
   restarts, half-duplex, "knight" + "f3" joined (1.4 s, no model), "thank you" and "14" answered, "pause" mutes, "no,
   knight c3" played (0.7 s). Not yet tried with a real microphone in Chrome, and not deployed.
+
+## Phase 8 — Fair levels, steadier ears, a rival instead of a coach (2026-10-17)
+
+Play-testing the stable build (`stable-2026-10-17`) and the day's live log showed:
+- **Even "easy" was hard to beat.** Levels 1–3 used Stockfish's Skill Level 0/3/6 and 4–7 its `UCI_Elo` (minimum 1320).
+  Stockfish turns `UCI_Elo` into a Skill level, so level 2 (Skill 3) played like level 5 and level 3 like level 7.
+  Nothing could play like an 800.
+- **She went deaf now and then.** 9 of 81 turns were dropped in silence by the open-mic filter, and in 8 of them the
+  user repeated themselves 2–12 s later. The filter read only the best transcript ("Vineet", while an alternative was
+  "Queen 8").
+- **Unasked coaching:** 13 of 81 replies were "Careful, your … is under attack"; mistakes got "X was better".
+- **Monologues:** read-outs skipped every limit (a 47-word list of queen moves, 153 words for the board).
+
+The user asked for:
+- easy ≈ 800, medium ≈ 1500, hard ≈ 2500;
+- short jabs when they play badly or she wins material, and short compliments when they play well (from their
+  own list of 300 lines);
+- the engine's best move only when asked ("The best move here, according to the engine, would be …"), with
+  asked-for analysis kept short;
+- replies like a person across the board.
+
+### Chess server
+- **Levels** (`chess/engine.ts`). Same numbers and words as before; the strengths changed:
+
+  | level | word | target | how |
+  |---|---|---|---|
+  | 1 | beginner | ~500 | picker: depth 3, T 260, blunders 18% |
+  | 2 | easy | ~800 | picker: depth 5, T 140, blunders 8% |
+  | 3 | casual | ~1100 | picker: depth 6, T 90, blunders 4.5% |
+  | 4 | medium | ~1500 | picker: depth 8, T 52, blunders 2.2% |
+  | 5 | challenging | ~2000 | `UCI_Elo 2600`, 800 ms |
+  | 6 | hard | ~2500 | `UCI_Elo 2850`, 1000 ms |
+  | 7 | expert | ~2800 | `UCI_Elo 3100`, 1000 ms |
+  | 8 | max | full | full strength, 1000 ms |
+
+- **Human-like picker** (`pickHumanlike`, levels 1–4):
+  - One MultiPV search scores every legal move at a shallow depth (20–240 ms locally).
+  - A move is drawn with weight `exp(-loss/T)`; with probability `blunderRate` it is a move losing 150–900 cp
+    instead (a hung piece, a missed tactic).
+  - The first 6 moves use half the temperature and no blunders, so openings look normal.
+  - It falls back to Skill 0 if the search fails.
+- **Every search resets `MultiPV 1`**: a timed-out `topMoves` could leave it at 3.
+- **Calibration** (`scripts/calibrate.ts`): self-play between neighbouring levels, judged by full-strength analysis
+  (ACPL = average centipawn loss).
+- **Facts for jabs and compliments** (`moveFacts` on `make_move`): which piece moved, captures, checks, the material
+  change over the turn, the phase, whether the user was in check, her pawn one step from queening, whether she took the
+  piece the user just moved, and the winner. `moveIdeas` now names forks.
+- **Hint** speaks only the engine's move: "The best move here, according to the engine, would be knight to f3." (no
+  idea). For three: "According to the engine, the best moves are …". `piece` limits it to one piece (Stockfish
+  `searchmoves`): "The best knight move here …".
+- **Shorter read-outs:**
+  - The board: "You have king e1, queen d1, …, pawns a2 to h2. I have …" (44 words at the start, was 73).
+  - Row by row: owners once per run, pawn ranges, empty ranks merged (47 words, was 153).
+  - Legal moves: 5 at most, squares only for one piece, captures first.
+  - `last_moves`: 6 half-moves at most. `game_history`: the last 6 unless `full: true`.
+  - `consider_move`: two sentences.
+  - `analyze_position`'s own speech no longer names the best move.
+- **Undo** replays from the game's start position (set-up games undid to the wrong position).
+
+### Agent
+- **Jabs and compliments** (`src/banter.ts`):
+  - The user's lines, word for word, by category: blunder, gift, inaccuracy, check, queen/rook attacked, fork,
+    piece, pressure, endgame, promotion, winning; praise for good moves, tactics, forks, attacks, mate, defence,
+    endgame; and parting words.
+  - Lines that claim a fact (a fork, a knight, a second check) are used only when it is true. Lines nobody can check
+    (pins, outposts, the clock) were left out.
+  - `pickBanter` decides from the server's facts only. Each remark has a tier: the game's end always; a blunder, a
+    gift, a fork or a won piece after 1 quiet move; mistakes and strong moves after 2; flavour after 3. No line
+    repeats in a game.
+  - Brief mode adds the line with no model call. Chatty mode gives the model the event and three examples.
+- **No unasked coaching:**
+  - "Careful, …", "X was better" and the "warn them" talking point are gone.
+  - The model never sees alerts, better moves, trend or her own threats on move turns.
+  - SKILL rule 3: every question gets a straight answer, and nothing is volunteered.
+  - Right after an undo, "what should I have played?" gives the hint.
+- **Short replies:**
+  - `capWords`: 30 words for moves, 35 for answers, unless a read-out was asked for.
+  - Sentence limits: brief answers 2, chatty moves 3 and answers 2.
+  - `maxTokens` 200.
+  - A guessed move quotes the words only when they were a short garble.
+- **Routing without the model:**
+  - Bare "undo" (0.3 s, was 1.3 s).
+  - "Read / describe the board" in the short form ("ranks" only when they say row or rank).
+  - Opponent-move questions go to her threat, with the user's own best moves hidden.
+  - "What should I avoid?" names the risk.
+  - "How am I doing?" gives the evaluation.
+  - Reasoning the model speaks by mistake ("The user asked me to…") is replaced by the tool's words.
+- **Hearing:**
+  - The open-mic filter reads every alternative ("Queen 8", "Pawan Singh 7", "pornh sex").
+  - A move heard only faintly ("ok fine" | "Nokia 5", "K5", "1087") gets "Sorry, I didn't catch your move. Say it
+    again?" with no model and no guess.
+- **Levels:** `LEVEL_NAMES` and SKILL.md say the new strengths.
+
+### Voice (web)
+- **Watchdog:** the mic restarts when it should be on but isn't for 1.5 s (a swallowed `start()`, a lost `end`
+  event), and a recognizer silent for 20 s is replaced.
+- **Fresh recognizer:** rebuilt after two sessions with speech but no words (also in en-US) and after real errors.
+  Restart after a phrase or silence is 100 ms (was 250).
+- **`not-allowed`** mutes with "Tap the speaker to turn it back on" instead of switching the mic off for good. Coming
+  back to the tab restarts the mic.
+- **A held half-move waits while the user is still talking** ("Bishop…" + "f4" was flushed mid-word).
+- **"Pause" or "stop" with a chess reading** ("pawn") no longer mutes or is dropped: it goes to the agent.
+- **Mic-cycle diagnostics** (on, sound, speech, no-speech) always go to the local mirror log, so the next deaf spell
+  shows whether Chrome heard anything.
+
+### Evaluation
+- **Calibration**, ACPL per level (self-play, 6 games per pairing; human bands: ~800 120+, ~1500 60–70, ~2000 ~40,
+  ~2500 20–25):
+
+  | level | round 1 (first settings; 5–7 at UCI_Elo 2000/2500/2800) | round 2 (5–7 at 2600/2850/3100) | round 3 (levels 3–5, medium at T 52) |
+  |---|---|---|---|
+  | 1 beginner | 232 (10 blunders/game) | 193 (8.2) | — |
+  | 2 easy | 183 (5.8) | 146 (7.2) | — |
+  | 3 casual | 105 (1.9) | 101 (2.5) | 94 (2.4) |
+  | 4 medium | 73 (1.1) | 54 (0.8) | **62** (1.0) |
+  | 5 challenging | 72 (1.8) | 39 (0.5) | 33 (0.4) |
+  | 6 hard | 55 (1.2) | 40 (1.1) | — |
+  | 7 expert | 21 (0.3) | 37 (1.5) | — |
+
+  - **Order:** in every round each level beat the one below it (5/6 to 8/8).
+  - **Time per move:** the picker levels take 25–200 ms, and 5–7 use their full 0.8–1 s.
+  - **ACPL depends on the opponent:** level 7 scored 21 against level 6 in round 1, but 37 in round 2 against a
+    stronger level 6.
+  - **Limits:** this is a proxy for human Elo. Your own games are the real check, especially for 6 and 7.
+
+- **`npm run rival`** (`scripts/rival-sim.ts`, new): whole games through the real agent in brief mode with no model.
+  The player is simulated: half engine moves, half random. It measures remarks, length, coaching and the score per
+  level.
+
+  | run | remark rate | words per move reply | coaching | model calls | simulated player's score (L1/L2/L3/L4) |
+  |---|---|---|---|---|---|
+  | round 1 | 0.48–0.60 | 12.3 avg, 22 max | 0 | 5 (sim bug) | 3/3, 2/3, 0/3, 0/3 |
+  | round 2 (tiers) | 0.29–0.33 | 11.1 avg, 21 max | 0 | 0 | 3/3, 2/3, 0/3, 0/3 |
+
+- **Conversation eval** (`npm run eval`, Nova 2 Lite, same 24-turn script):
+
+  | build | sentences / reply | words / reply | max latency | cost |
+  |---|---|---|---|---|
+  | stable-2026-10-17 | 1.83 | 10.8 | 8.9 s | $0.014 |
+  | Phase 8 | 1.96 | 11.2 | 2.0 s | $0.015 |
+
+- **305 questions** (`npm run qa -- --no-judge`, Nova 2 Lite):
+
+  | run | words per answer (avg / p50 / p90 / max) | answers over 35 words | cost |
+  |---|---|---|---|
+  | 16 Oct (round 2, before Phase 6b–8) | 25.6 / 24 / 43 / 149 | 67 | — |
+  | Phase 8 round 1 | 18.4 / 17 / 27 / 149 | 5 | ~$0.34 (usage not yet recorded) |
+  | Phase 8 final | 19.4 / 19 / 30 / 81 | 6 (all asked-for read-outs or "explain everything") | $0.334 |
+
+  - **Unasked coaching** (a scan for "careful", "was better", "you should" in answers to questions that didn't ask
+    for help): 0.
+  - **Reasoning leaks:** 0 in the final run.
+  - **Errors:** 0.
+
+  Rounds 2–6 fixed:
+  - opponent questions answered with the user's moves;
+  - "what should I avoid" getting the best move;
+  - "best move for my knight" getting a pawn move;
+  - a model reasoning leak (170 words);
+  - over-cautious refusals ("that would be coaching", "a strategic advantage I can't give away", "cheating").
+
+  Nova 2 Lite kept refusing to help its own opponent. Three things stopped it:
+  - **Code answers:** "which of my pieces are under attack / anything hanging / alert me" is now answered straight
+    from the facts.
+  - **Note:** every routed analysis answer carries "you are the player's eyes as well as their opponent".
+  - **Retry:** a reply that still refuses gets one more model call. If that refuses too, it becomes "I can't spot
+    that from here. Ask me what's under attack or what I'm threatening, and I'll tell you."
+
+  Re-running the refusal-prone questions twice, 7 of 8 were answered both times; the 8th ("remove the defender of
+  their queen") isn't in the facts.
+- **Conversation eval, later rounds:**
+  - **"Quiet move."** The model said its talking-point label out loud. The labels were reworded, and the
+    sentence is dropped if it slips through.
+  - **Chatty move turns.** Twice they left out a move ("Pawn to a3. A free piece? Don't mind if I do."). Chatty
+    turns now take both moves from the template, and the model adds only the reaction. Final run: 1.88 sentences
+    and 10.6 words per reply, every engine move said, 1.7 s max, $0.0126.
+- **Browser** (scripted recognizer, local agent with Nova 2 Lite and Polly, no Transcribe):
+  - The watchdog restarted a swallowed start in 2.3 s.
+  - "Bishop" + "f4" (started 3.5 s later) was joined and played.
+  - "pause" | "pawn" was answered instead of muting.
+  - The hint wording was right, and "Bishop a6??" got "That piece had better days."
+  - Undo took 0.3 s, then "what should I have played?" gave the engine's move.
+  - "ok fine" | "Nokia 5" and "K5" were re-asked in 0.3 s.
+  - The board read-out was 54 words, mid-game.
+  - `not-allowed` muted with the tap hint, and a tap restarted the mic.
+  - Two deaf cycles gave a fresh recognizer.
+- **Prices** in the evals are now the ones billed in ap-south-1 (Nova 2 Lite $0.35 / $2.95 per million tokens),
+  and `qa-eval` records usage and cost.
+
+### Cost of this phase
+**About $1.08 in all (Nova 2 Lite and Polly, ap-south-1, covered by credits).** No Transcribe was used, and
+calibration and the rival sim run on local Stockfish at no cost.
+
+| item | runs | cost |
+|---|---|---|
+| 305-question eval, no judge | 2 full runs plus 5 targeted rounds (149 questions) | ~$0.87 |
+| conversation eval | 6 runs, including one on the stable build | ~$0.08 |
+| browser tests (local agent with Polly) | 2 sessions | ~$0.06 |
+| Cost Explorer queries (billing check) | 7 | $0.07 |
+
+### Tests
+- **Chess server 168** (was 155):
+  - engine picker statistics with a seeded RNG, and every level legal and fast;
+  - easy finds a mate in one;
+  - `moveFacts`, the winner, undo from a set-up position;
+  - short move lists and `game_history`;
+  - hint wording, and the hint for one piece;
+  - fork ideas;
+  - compact board read-outs.
+- **Agent 79** (was 61):
+  - `banter.test.ts`: event mapping, fact gates, tiers, no repeats, line length;
+  - the no-coaching facts;
+  - `capWords`;
+  - today's dropped lines and faint moves;
+  - direct routes, undo then "what should I have played";
+  - refusal retry, reasoning leak, move guard, labels said aloud.
+- **Page 81 checks** (was 73): "pause" vs "pawn".
+
+### Status
+Built, tested locally and in the browser with a scripted recognizer. **Not yet played with a real microphone, not
+committed and not deployed.** The next real-mic session will log every mic cycle to the local drawer log, which
+shows whether any remaining deaf spell is Chrome's.

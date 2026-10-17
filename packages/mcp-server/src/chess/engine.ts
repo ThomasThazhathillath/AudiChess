@@ -9,17 +9,47 @@ interface StockfishInstance {
   listener?: (line: string) => void;
 }
 
-/** Difficulty 1-8. 1-3 use Stockfish's Skill Level (weakest), 4-8 use calibrated Elo. */
-export const LEVELS: Record<number, { label: string; skill?: number; elo?: number; movetimeMs: number }> = {
-  1: { label: "beginner", skill: 0, movetimeMs: 150 },
-  2: { label: "novice", skill: 3, movetimeMs: 200 },
-  3: { label: "casual", skill: 6, movetimeMs: 250 },
-  4: { label: "club player, about 1400", elo: 1400, movetimeMs: 400 },
-  5: { label: "intermediate, about 1700", elo: 1700, movetimeMs: 500 },
-  6: { label: "strong club player, about 2000", elo: 2000, movetimeMs: 600 },
-  7: { label: "expert, about 2400", elo: 2400, movetimeMs: 800 },
+/**
+ * How a weak level picks its move: every legal move is scored by a shallow full-strength search, then one is drawn
+ * with weight exp(-loss / temperature). With probability `blunderRate` it plays a move losing 150-900 centipawns
+ * instead (a hung piece, a missed tactic): the way 500-1500 players actually lose games.
+ */
+export interface HumanStyle {
+  depth: number;
+  temperature: number;
+  blunderRate: number;
+}
+
+export interface LevelConfig {
+  label: string;
+  movetimeMs: number;
+  /** Stockfish's own limiter, for levels inside its range (UCI_Elo 1320-3190). */
+  uciElo?: number;
+  /** The human-like picker, for levels below Stockfish's floor (its weakest setting plays far above 800). */
+  human?: HumanStyle;
+}
+
+/**
+ * Difficulty 1-8. Stockfish 19 can't play below about 1320 (the UCI_Elo minimum; Skill 0 is about the same), and the
+ * old levels 2-3 (Skill 3 / 6) were as strong as levels 5 and 7 (2026-10-17). Levels 1-4 use the human-like picker,
+ * 5-7 Stockfish's Elo limiter. Tuned with scripts/calibrate.ts (docs/PLAN.md, Phase 8).
+ * Round 1 (ACPL per level): 232, 183, 105, 73, then UCI_Elo 2000 = 72, 2500 = 55, 2800 = 21. Stockfish's limiter plays
+ * far below its number with the lite network at these move times, so levels 5-7 use higher UCI_Elo values.
+ * Round 2 (these settings, medium then at T 50): 193, 146, 101, 54, 39, 40, 37; every level beat the one below.
+ */
+export const LEVELS: Record<number, LevelConfig> = {
+  1: { label: "beginner, about 500", human: { depth: 3, temperature: 260, blunderRate: 0.18 }, movetimeMs: 500 },
+  2: { label: "easy, about 800", human: { depth: 5, temperature: 140, blunderRate: 0.08 }, movetimeMs: 500 },
+  3: { label: "casual, about 1100", human: { depth: 6, temperature: 90, blunderRate: 0.045 }, movetimeMs: 600 },
+  4: { label: "medium, about 1500", human: { depth: 8, temperature: 52, blunderRate: 0.022 }, movetimeMs: 700 },
+  5: { label: "challenging, about 2000", uciElo: 2600, movetimeMs: 800 },
+  6: { label: "hard, about 2500", uciElo: 2850, movetimeMs: 1000 },
+  7: { label: "expert, about 2800", uciElo: 3100, movetimeMs: 1000 },
   8: { label: "maximum strength", movetimeMs: 1000 },
 };
+
+/** Moves the picker scores at once: Stockfish clamps MultiPV to the number of legal moves. */
+const ALL_MOVES_PV = 64;
 
 let engine: StockfishInstance | undefined;
 let queue: Promise<unknown> = Promise.resolve();
@@ -109,29 +139,73 @@ function positionCommand(uciMoves: string[], startFen?: string): string {
   return startFen ? `position fen ${startFen}${moves}` : `position startpos${moves}`;
 }
 
-function strengthCommands(level: number): string[] {
+/**
+ * Strength options for one search. MultiPV is reset first every time: a timed-out MultiPV search once left it at 3
+ * for the searches after it. `skill` overrides the level (0 = Stockfish's weakest, the picker's fallback).
+ */
+function strengthCommands(level: number, skill?: number): string[] {
   const cfg = LEVELS[level] ?? LEVELS[4];
-  if (cfg.elo) {
+  if (cfg.uciElo && skill === undefined) {
     return [
+      "setoption name MultiPV value 1",
       "setoption name Skill Level value 20",
       "setoption name UCI_LimitStrength value true",
-      `setoption name UCI_Elo value ${cfg.elo}`,
+      `setoption name UCI_Elo value ${cfg.uciElo}`,
     ];
   }
   return [
+    "setoption name MultiPV value 1",
     "setoption name UCI_LimitStrength value false",
-    `setoption name Skill Level value ${cfg.skill ?? 20}`,
+    `setoption name Skill Level value ${skill ?? 20}`,
   ];
 }
 
+/**
+ * Picks a weak level's move from the engine's scored lines (side to move's scores, any order): weight
+ * exp(-loss / T) per move, loss = best score minus its score, capped at 2000 cp. With probability `blunderRate` a
+ * move losing 150-900 cp is played instead, when there is one. `opening`: T halved and no blunders, so the first
+ * moves look like a person who knows how to start a game.
+ */
+export function pickHumanlike(lines: Line[], style: HumanStyle, rng: () => number = Math.random, opening = false): string {
+  const unique = [...new Map(lines.map((l) => [l.move, l])).values()];
+  if (unique.length === 0) throw new Error("No candidate moves");
+  const best = Math.max(...unique.map((l) => l.scoreCp));
+  const loss = (l: Line) => Math.min(2000, Math.max(0, best - l.scoreCp));
+  if (!opening && rng() < style.blunderRate) {
+    const pool = unique.filter((l) => loss(l) >= 150 && loss(l) <= 900);
+    if (pool.length) return pool[Math.min(pool.length - 1, Math.floor(rng() * pool.length))].move;
+  }
+  const t = opening ? style.temperature / 2 : style.temperature;
+  const weights = unique.map((l) => Math.exp(-loss(l) / t));
+  let r = rng() * weights.reduce((a, b) => a + b, 0);
+  for (let i = 0; i < unique.length; i++) {
+    r -= weights[i];
+    if (r <= 0) return unique[i].move;
+  }
+  return unique[unique.length - 1].move;
+}
+
 /** The engine's reply for the given level. `uciMoves` is the full game so far from the start position. */
-export async function engineMove(uciMoves: string[], level: number, startFen?: string): Promise<string> {
+export async function engineMove(uciMoves: string[], level: number, startFen?: string, rng: () => number = Math.random): Promise<string> {
   const cfg = LEVELS[level] ?? LEVELS[4];
+  const position = positionCommand(uciMoves, startFen);
+  if (cfg.human) {
+    try {
+      const lines = await multiPv(
+        [...strengthCommands(8), `setoption name MultiPV value ${ALL_MOVES_PV}`, "ucinewgame", position],
+        `go depth ${cfg.human.depth} movetime ${cfg.movetimeMs}`,
+        cfg.movetimeMs + 10_000,
+      );
+      if (lines.length) return pickHumanlike(lines, cfg.human, rng, uciMoves.length < 12);
+    } catch {
+      // Fall back to Stockfish's weakest setting below: a move is better than none.
+    }
+  }
   const r = await search(
     [
-      ...strengthCommands(level),
+      ...(cfg.human ? strengthCommands(level, 0) : strengthCommands(level)),
       "ucinewgame",
-      positionCommand(uciMoves, startFen),
+      position,
       `go movetime ${cfg.movetimeMs}`,
     ],
     cfg.movetimeMs + 10_000,
@@ -179,12 +253,23 @@ export interface Line {
  * Used for "what are my three best moves", threats (the opponent's best move in the same position) and
  * "what happens if". Returns [] for positions without legal moves.
  */
-export function topMoves(fen: string, count = 3, movetimeMs = 600): Promise<Line[]> {
+export function topMoves(fen: string, count = 3, movetimeMs = 600, searchMoves?: string[]): Promise<Line[]> {
+  // `searchmoves` limits the search to some moves (UCI), e.g. one piece's: "the best move for my knight".
+  const only = searchMoves?.length ? ` searchmoves ${searchMoves.join(" ")}` : "";
+  return multiPv(
+    [...strengthCommands(8), `setoption name MultiPV value ${count}`, "ucinewgame", `position fen ${fen}`],
+    `go depth 14 movetime ${movetimeMs}${only}`,
+    movetimeMs + 10_000,
+  );
+}
+
+/** One MultiPV search: the last exact score and line for each rank, best first. `setup` sets MultiPV itself. */
+function multiPv(setup: string[], go: string, timeoutMs: number): Promise<Line[]> {
   const lines = new Map<number, Line>();
   return runUci(
-    [...strengthCommands(8), `setoption name MultiPV value ${count}`, "ucinewgame", `position fen ${fen}`],
-    `go depth 14 movetime ${movetimeMs}`,
-    movetimeMs + 10_000,
+    setup,
+    go,
+    timeoutMs,
     (line) => {
       // Only exact scores: bound lines (lowerbound/upperbound) come from aspiration windows and can rank badly.
       if (!/ multipv (\d+)/.test(line) || !/ pv /.test(line) || / (lower|upper)bound/.test(line)) return;
@@ -196,8 +281,9 @@ export function topMoves(fen: string, count = 3, movetimeMs = 600): Promise<Line
       const pv = line.split(" pv ")[1].trim().split(/\s+/);
       lines.set(k, { move: pv[0], scoreCp, mate, pv });
     },
-    () => {
+    (best) => {
       getEngine().processCommand("setoption name MultiPV value 1"); // every other search expects one line
+      if (best === "(none)") return [];
       return [...lines.entries()].sort((a, b) => a[0] - b[0]).map(([, l]) => l);
     },
   );

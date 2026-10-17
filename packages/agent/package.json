@@ -11,7 +11,8 @@
     "ab": "node --import ./scripts/md-loader.mjs --import tsx scripts/ab.ts",
     "eval": "node --import ./scripts/md-loader.mjs --import tsx scripts/converse-eval.ts",
     "qa": "node --import ./scripts/md-loader.mjs --import tsx scripts/qa-eval.ts",
-    "sim": "node --import ./scripts/md-loader.mjs --import tsx scripts/game-sim.ts"
+    "sim": "node --import ./scripts/md-loader.mjs --import tsx scripts/game-sim.ts",
+    "rival": "node --import ./scripts/md-loader.mjs --import tsx scripts/rival-sim.ts"
   },
   "dependencies": {
     "@aws-sdk/client-bedrock-runtime": "^3.1152.0",

@@ -87,7 +87,18 @@ for (const t of ["knight f3", "castle", "e4", "what's the best move", "queen sid
 // Voice off switch for the open mic.
 for (const t of ["pause", "Stop listening.", "Alexa, go to sleep", "mute"]) assert.equal(isSleep(t), true, t);
 for (const t of ["stop", "pause the game and tell me the score", "knight f3"]) assert.equal(isSleep(t), false, t);
-console.log(`wake.js: ${n + 35 + 5 + 14 + 7} checks passed`);
+// ...but not when another reading is a pawn or a square ("pause" right after "Did you mean pawn to d4?", 2026-10-17).
+const { isSleepCommand } = globalThis.AlexaWake;
+assert.equal(isSleepCommand(["pause"]), true);
+assert.equal(isSleepCommand(["Pause.", "pause listening", "paws"]), true);
+assert.equal(isSleepCommand(["pause", "pawn"]), false);
+assert.equal(isSleepCommand(["pause", "porn d4"]), false);
+assert.equal(isSleepCommand(["mute", "e4"]), false);
+assert.equal(isSleepCommand(["knight f3"]), false);
+const { soundsLikeChess } = globalThis.AlexaWake;
+assert.equal(soundsLikeChess(["pawn", "paws"]), true);
+assert.equal(soundsLikeChess(["paws", "pours"]), false);
+console.log(`wake.js: ${n + 35 + 5 + 14 + 7 + 8} checks passed`);
 
 // ---------- vosk.js: timeline, hearings, pairing with Chrome ----------
 new Function(readFileSync(new URL("../web/vosk.js", import.meta.url), "utf8"))();

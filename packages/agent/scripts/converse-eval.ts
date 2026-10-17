@@ -119,10 +119,12 @@ export interface EvalTurn {
 }
 
 /** Approximate on-demand prices per 1M tokens (same sources as scripts/ab.ts). */
+// As billed in ap-south-1 (Cost Explorer, October 2026: Nova 2 Lite $0.35 / $2.95, Nova Pro $0.94 / $3.75 per million;
+// cache reads at a quarter of input). The list prices used before were about 17% lower.
 export const PRICES: Record<string, { inPerM: number; outPerM: number }> = {
-  "apac.amazon.nova-pro-v1:0": { inPerM: 0.8, outPerM: 3.2 },
+  "apac.amazon.nova-pro-v1:0": { inPerM: 0.94, outPerM: 3.75 },
   "apac.amazon.nova-lite-v1:0": { inPerM: 0.06, outPerM: 0.24 },
-  "global.amazon.nova-2-lite-v1:0": { inPerM: 0.3, outPerM: 2.5 },
+  "global.amazon.nova-2-lite-v1:0": { inPerM: 0.35, outPerM: 2.95 },
 };
 
 export function words(text: string): string[] {

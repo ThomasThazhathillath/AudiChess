@@ -73,7 +73,42 @@ export function spokenPieceList(pieces: { type: PieceSymbol; square: Square }[])
   return parts.length ? parts.join("; ") : "no pieces";
 }
 
+/**
+ * The short form for read-outs: "king e1, queen d1, rooks a1 and h1, ..., pawns a2 to h2". Three or more pawns side
+ * by side on one rank are a range ("a2 to c2"), which halves a full board read-out.
+ */
+export function compactPieceList(pieces: { type: PieceSymbol; square: Square }[]): string {
+  const order: PieceSymbol[] = ["k", "q", "r", "b", "n", "p"];
+  const parts: string[] = [];
+  for (const type of order) {
+    const squares = pieces.filter((p) => p.type === type).map((p) => spokenSquare(p.square)).sort();
+    if (squares.length === 0) continue;
+    const name = squares.length === 1 ? PIECE_NAMES[type] : PIECE_PLURALS[type];
+    parts.push(`${name} ${joinAnd(type === "p" ? pawnRuns(squares) : squares)}`);
+  }
+  return parts.length ? parts.join(", ") : "no pieces";
+}
+
+/** ["a2","b2","c2","e4"] -> ["a2 to c2", "e4"]: runs of three or more neighbouring files on the same rank. */
+function pawnRuns(squares: string[]): string[] {
+  const byRank = [...squares].sort((a, b) => a[1].localeCompare(b[1]) || a.localeCompare(b));
+  const out: string[] = [];
+  for (let i = 0; i < byRank.length; ) {
+    let j = i;
+    while (j + 1 < byRank.length && byRank[j + 1][1] === byRank[i][1] && byRank[j + 1].charCodeAt(0) === byRank[j].charCodeAt(0) + 1) j++;
+    if (j - i >= 2) out.push(`${byRank[i]} to ${byRank[j]}`);
+    else for (let k = i; k <= j; k++) out.push(byRank[k]);
+    i = j + 1;
+  }
+  return out;
+}
+
 export function joinAnd(items: string[]): string {
   if (items.length <= 1) return items.join("");
   return `${items.slice(0, -1).join(", ")} and ${items[items.length - 1]}`;
+}
+
+export function joinOr(items: string[]): string {
+  if (items.length <= 1) return items.join("");
+  return `${items.slice(0, -1).join(", ")} or ${items[items.length - 1]}`;
 }

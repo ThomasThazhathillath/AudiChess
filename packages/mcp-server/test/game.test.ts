@@ -10,7 +10,7 @@ import {
   replay,
   statusOf,
 } from "../src/chess/game.js";
-import { spokenMove } from "../src/chess/spoken.js";
+import { compactPieceList, spokenMove } from "../src/chess/spoken.js";
 
 const play = (...sans: string[]) => {
   const c = new Chess();
@@ -99,15 +99,36 @@ describe("position helpers", () => {
     expect(describeSquare(c, "E1")).toBe("There is a white king on e1.");
     expect(describeSquare(c, "e4")).toBe("e4 is empty.");
     expect(() => describeSquare(c, "z9")).toThrow();
-    expect(readBoard(c)).toContain("White has king on e1; queen on d1; rooks on a1 and h1");
-    expect(readBoard(c, "ranks")).toContain("Rank 4: empty.");
+    expect(readBoard(c)).toBe("White has king e1, queen d1, rooks a1 and h1, bishops c1 and f1, knights b1 and g1, pawns a2 to h2. Black has king e8, queen d8, rooks a8 and h8, bishops c8 and f8, knights b8 and g8, pawns a7 to h7.");
+    expect(readBoard(c, "pieces", "b")).toMatch(/^You have king e8, .*\. I have king e1, /);
+    expect(readBoard(c, "ranks", "w")).toBe(
+      "Rank 8: my rook a8, knight b8, bishop c8, queen d8, king e8, bishop f8, knight g8, rook h8. Rank 7: my pawns a7 to h7. " +
+        "Ranks 6 to 3: empty. Rank 2: your pawns a2 to h2. Rank 1: your rook a1, knight b1, bishop c1, queen d1, king e1, bishop f1, knight g1, rook h1.",
+    );
+    const mixed = play("e4", "d5", "exd5");
+    expect(readBoard(mixed, "ranks", "w")).toContain("Rank 5: your pawn d5.");
+    expect(readBoard(mixed, "ranks", "b")).toContain("Rank 2: my pawns a2 to d2, pawns f2 to h2. ");
+    expect(readBoard(mixed, "ranks", "b")).toContain("Rank 6: empty. Rank 5: my pawn d5. Ranks 4 to 3: empty.");
+    expect(readBoard(new Chess("4k3/8/8/8/8/8/8/4K3 w - - 0 1"), "ranks")).toBe("Rank 8: black king e8. Ranks 7 to 2: empty. Rank 1: white king e1.");
   });
 
   it("lists legal moves for a piece and a square", () => {
     const c = new Chess();
     expect(legalMovesSpoken(c, { piece: "knight" }).moves.sort()).toEqual(["Na3", "Nc3", "Nf3", "Nh3"]);
-    expect(legalMovesSpoken(c, { square: "e2" }).speech).toBe("The pawn on e2 can play: pawn to e3 and pawn to e4.");
+    expect(legalMovesSpoken(c, { square: "e2" }).speech).toBe("The pawn on e2 can go to e3 or e4.");
     expect(legalMovesSpoken(c, { square: "e1" }).speech).toBe("The king on e1 can't move right now.");
+    // One queen: captures first, squares only, five at most (the 47-word list from the 2026-10-17 game).
+    const q = new Chess("4k3/7p/8/8/8/8/3Q4/4K3 w - - 0 1");
+    const speech = legalMovesSpoken(q, { piece: "queen" }).speech;
+    expect(speech).toMatch(/^Your queen can go to [a-h][1-8], [a-h][1-8], [a-h][1-8], [a-h][1-8] or [a-h][1-8], and \d+ more\.$/);
+    const capture = new Chess("4k3/8/8/8/8/8/3Qp3/4K3 w - - 0 1");
+    expect(legalMovesSpoken(capture, { piece: "queen" }).speech).toMatch(/^Your queen can take on e2, or go to /);
+    expect(legalMovesSpoken(new Chess(), {}).speech).toMatch(/^You can play: .+, and 15 more\.$/);
+  });
+
+  it("reads pawns as ranges", () => {
+    expect(compactPieceList([{ type: "p", square: "a2" }, { type: "p", square: "b2" }, { type: "p", square: "c2" }, { type: "p", square: "e4" }, { type: "p", square: "g2" }, { type: "p", square: "h2" }]))
+      .toBe("pawns a2 to c2, g2, h2 and e4");
   });
 
   it("counts material", () => {

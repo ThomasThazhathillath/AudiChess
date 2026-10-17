@@ -1,5 +1,6 @@
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { DynamoDBDocumentClient, GetCommand, PutCommand } from "@aws-sdk/lib-dynamodb";
+import type { BanterState } from "./banter.js";
 
 /** One spoken exchange. Only user text and the final spoken reply are kept; tool chatter is not. */
 export interface Turn {
@@ -26,6 +27,10 @@ export interface Session {
   rate?: number;
   /** Repeat each move back and play it only after a yes. */
   confirmMoves?: boolean;
+  /** Jabs and compliments said this game, and how long it has been quiet (banter.ts). */
+  banter?: BanterState;
+  /** The last thing done was an undo: "what should I have played?" now means the best move here. */
+  justUndid?: boolean;
   turns: Turn[];
   updatedAt: string;
   expiresAt: number;

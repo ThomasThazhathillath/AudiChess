@@ -63,10 +63,13 @@ export function moveIdeas(move: Move, chessAfter: Chess): string[] {
   if ((move.piece === "n" || move.piece === "b") && move.from[1] === homeRank) ideas.push(`develops the ${PIECE_NAMES[move.piece]}`);
   if (move.piece === "p" && (move.to === "d4" || move.to === "e4" || move.to === "d5" || move.to === "e5")) ideas.push("stakes a claim in the centre");
   if (move.piece === "q" && chessAfter.history().length < 12) ideas.push("brings the queen out early");
-  // Threats the moved piece creates against more valuable or undefended targets.
+  // Threats the moved piece creates against more valuable or undefended targets; two at once (or one plus check) is a fork.
   const enemy: Color = move.color === "w" ? "b" : "w";
   const targets = hangingPieces(chessAfter, enemy).filter((h) => chessAfter.attackers(h.square, move.color).includes(move.to));
-  if (targets.length) ideas.push(`attacks the ${PIECE_NAMES[targets[0].piece]} on ${spokenSquare(targets[0].square)}`);
+  const named = targets.map((t) => `the ${PIECE_NAMES[t.piece]} on ${spokenSquare(t.square)}`);
+  if (targets.length >= 2) ideas.push(`forks ${named[0]} and ${named[1]}`);
+  else if (targets.length && move.san.endsWith("+")) ideas.push(`forks the king and ${named[0]}`);
+  else if (targets.length) ideas.push(`attacks ${named[0]}`);
   return ideas;
 }
 

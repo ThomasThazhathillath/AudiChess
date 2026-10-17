@@ -13,6 +13,13 @@ import {
   factsForModel,
   QUIET_THEMES,
   limitSentences,
+  capWords,
+  isFaintMove,
+  LEVEL_NAMES,
+  REASONING_LEAK,
+  REFUSAL,
+  attackedAnswer,
+  saysMove,
   recentPhrases,
   runTurn,
   talkingPoints,
@@ -104,14 +111,14 @@ describe("runTurn", () => {
     expect(r.reply).toContain("no game");
   });
 
-  it("falls back to the tool's own speech if the model goes silent", async () => {
+  it("still says both moves if the model goes silent", async () => {
     const sessions = new MemorySessionStore();
     await sessions.put({ sessionId: "session-3", gameId: "g-1", humanColor: "White", level: 3, turns: [], updatedAt: "", expiresAt: 0 });
     const { tools } = fakeTools();
     await sessions.put({ ...(await sessions.get("session-3"))!, chattiness: "chatty" });
     const s = scriptedConverse([say("<thinking>done</thinking>")]);
     const r = await runTurn({ converse: s.converse, tools, sessions, modelId: "m" }, "session-3", "e4");
-    expect(r.reply).toBe("You played pawn to e4. I play pawn to e5.");
+    expect(r.reply).toBe("Pawn to e4. I play pawn to e5.");
     // Chatty mode phrases the move with one model call that sees the facts, but no ids, FEN or ready-made sentence.
     expect(s.calls).toHaveLength(1);
     expect(s.calls[0].inferenceConfig?.temperature).toBe(0.3);
@@ -248,11 +255,20 @@ describe("Phase 5: lively, non-repeating conversation", () => {
     expect((await sessions.get("s-chat"))!.chattiness).toBe("chatty");
   });
 
-  it("hides 'better was' for small inaccuracies", () => {
+  it("never hands the model a better move, a warning or her own threats (no unasked coaching)", () => {
     const facts = factsForModel("make_move", { commentary: { yourMove: { quality: "inaccuracy", lossCp: 80, betterWas: "knight to c3" } } }, false, "chatty");
     expect((facts.commentary as any).yourMove).toEqual({ quality: "inaccuracy" });
-    const bad = factsForModel("make_move", { commentary: { yourMove: { quality: "blunder", lossCp: 400, betterWas: "knight to c3" } } }, false, "chatty");
-    expect((bad.commentary as any).yourMove.betterWas).toBe("knight to c3");
+    const bad = factsForModel("make_move", {
+      commentary: { yourMove: { quality: "blunder", lossCp: 400, betterWas: "knight to c3" }, alerts: ["your rook on g6 is under attack by a pawn"], trend: "slipping", myMoveIdeas: ["attacks the knight on c3", "develops the bishop"] },
+      moveFacts: { iCaptured: "bishop" },
+    }, false, "chatty");
+    expect((bad.commentary as any).yourMove).toEqual({ quality: "blunder" });
+    expect(bad.commentary).not.toHaveProperty("alerts");
+    expect(bad.commentary).not.toHaveProperty("trend");
+    expect((bad.commentary as any).myMoveIdeas).toEqual(["develops the bishop"]);
+    expect(bad).not.toHaveProperty("moveFacts");
+    const withJab = factsForModel("make_move", { commentary: {} }, false, "chatty", 0, { mood: "taunt", event: "the user blundered", line: "Ouch! That was expensive.", examples: ["Ouch! That was expensive."] });
+    expect(withJab.react).toMatchObject({ mood: "taunt", examples: ["Ouch! That was expensive."] });
   });
 
   it("collects openers, closers and repeated phrases to avoid", () => {
@@ -273,7 +289,9 @@ describe("Phase 5: lively, non-repeating conversation", () => {
       inCheck: true,
       commentary: { yourMove: { quality: "blunder", betterWas: "knight to e2" }, opening: { name: "French Defense", reachedBy: "my move" }, myMoveIdeas: ["captures a bishop"] },
     });
-    expect(big).toEqual(["the user is in check", "the user's move was a blunder (better was knight to e2; only mention if it fits)"]);
+    expect(big).toEqual(["the user is in check", "the user's move was a blunder (jab them for it; never say what was better)"]);
+    // Warnings and her own threats are never talking points.
+    expect(talkingPoints({ commentary: { alerts: ["your bishop on c4 is under attack by a pawn"], myMoveIdeas: ["attacks the knight on c3"] } }, 3)).toEqual([QUIET_THEMES[0]]);
     const quiet = { commentary: { myMoveIdeas: [], alerts: [] } };
     expect(talkingPoints(quiet)).toEqual([QUIET_THEMES[0]]);
     expect(talkingPoints(quiet, 2, 1)).toEqual([QUIET_THEMES[1]]);
@@ -507,6 +525,101 @@ describe("Phase 6: background speech, speed and shorter answers", () => {
     expect(addressedToAlexa(["14"], { ...quiet, gameId: undefined })).toBe(false); // no game: just a number
     const castle = { ...quiet, pending: { candidates: ["O-O", "O-O-O"], asks: 1 } };
     expect(addressedToAlexa(["kingside"], castle)).toBe(true);
+    // The 2026-10-17 game: dropped in silence, then repeated by the user 2-12 s later. Every reading counts now.
+    const dropped = [["ok fine", "Nokia 5", "broken 5"], ["Vineet", "Queen 8"], ["K5"], ["1087"], ["sorry", "sorry ruk"], ["kaun si", "Pawan Singh 7"], ["pornh sex"], ["Bishop"]];
+    for (const heard of dropped) expect(addressedToAlexa(heard, quiet), heard.join(" | ")).toBe(true);
+    expect(addressedToAlexa(["Intex phone"], quiet)).toBe(false); // nothing chess in any reading: still background
+    expect(addressedToAlexa(["ok fine", "Nokia 5"], { ...quiet, gameId: undefined })).toBe(false); // no game
+    expect(looksLikeMove("Vineet", "Queen 8")).toBe(true);
+    expect(looksLikeMove("kaun si", "Pawan Singh 7")).toBe(true);
+    // Only faintly a move: asked again in a few words, without the model (it once guessed queen to e2).
+    for (const heard of [["ok fine", "Nokia 5"], ["K5"], ["1087"], ["sorry", "sorry ruk"]]) expect(isFaintMove(heard, quiet), heard.join(" | ")).toBe(true);
+    for (const heard of [["Vineet", "Queen 8"], ["hint"], ["what's 2 plus 2?"], ["my queen"], ["thank you"]]) expect(isFaintMove(heard, quiet), heard.join(" | ")).toBe(false);
+  });
+
+  it("routes plain commands and the board read-out without the model", () => {
+    expect(routeQuestion("undo")).toEqual({ name: "undo", args: {} });
+    expect(routeQuestion("Take back my last move.")).toEqual({ name: "undo", args: {} });
+    expect(routeQuestion("can you redo the move?")).toBeUndefined();
+    expect(routeQuestion("read the board")).toEqual({ name: "read_board", args: { format: "pieces" } });
+    expect(routeQuestion("read me the board row by row")).toEqual({ name: "read_board", args: { format: "ranks" } });
+    // The opponent's moves are her threat, not the user's hint (the qa eval got the user's best move for these).
+    expect(routeQuestion("What would my opponent play next?")).toMatchObject({ name: "analyze_position", args: {}, note: expect.stringMatching(/threat/) });
+    expect(routeQuestion("What are their best candidate moves?")).toMatchObject({ name: "analyze_position", args: {} });
+    expect(routeQuestion("what's the best move?")?.name).toBe("hint");
+    expect(routeQuestion("Announce every move my opponent makes.")).toBeUndefined(); // a request, not a question
+    expect(routeQuestion("What move should I avoid?")).toMatchObject({ name: "analyze_position", note: expect.stringMatching(/AVOID/) });
+    expect(routeQuestion("What is the best move for my knight?")).toEqual({ name: "hint", args: { count: 1, reveal: true, piece: "knight" } });
+    expect(routeQuestion("Can you describe the current board?")).toEqual({ name: "read_board", args: { format: "pieces" } });
+  });
+
+  it("asks once more when the model refuses a chess question as 'cheating'", async () => {
+    const sessions = new MemorySessionStore();
+    await gameSession(sessions, "s-refuse");
+    const { tools } = fakeTools();
+    const s = scriptedConverse([
+      use("answer", { reply: "Sorry, I can't give advice on how to attack your opponent's queen. That would be cheating." }),
+      say("Yes: my knight on f6 guards the queen, and your bishop can take it."),
+    ]);
+    const r = await runTurn({ converse: s.converse, tools, sessions, modelId: "m" }, "s-refuse", "Can I remove the defender of their queen?");
+    expect(s.calls).toHaveLength(2);
+    expect(r.reply).toBe("Yes: my knight on f6 guards the queen, and your bishop can take it.");
+    // Refused again: a neutral line, never "that would be cheating".
+    const s2 = scriptedConverse([
+      use("answer", { reply: "Sorry, I can't give advice on how to attack your opponent's queen. That would be cheating." }),
+      say("Sorry, I can't give that away."),
+    ]);
+    const r2 = await runTurn({ converse: s2.converse, tools, sessions, modelId: "m" }, "s-refuse", "Can I remove the defender of their queen?");
+    expect(r2.reply).toBe("I can't spot that from here. Ask me what's under attack or what I'm threatening, and I'll tell you.");
+    expect(REFUSAL.test("Sorry, I can't give chess advice that helps you target my queen. That's cheating.")).toBe(true);
+    expect(REFUSAL.test("Sorry, I can't alert you automatically. Ask me any time.")).toBe(false);
+    expect(REFUSAL.test("Sorry, I can't reveal my long-term plan. That would spoil the fun!")).toBe(true);
+    expect(REFUSAL.test("No, you can't castle: your king is in check.")).toBe(false);
+    expect(REFUSAL.test("Sorry, I can't give you a direct answer that might help you win the game.")).toBe(true);
+  });
+
+  it("answers 'which of my pieces are under attack' straight from the facts", () => {
+    expect(routeQuestion("Tell me which squares are under attack.")).toEqual({ name: "analyze_position", args: {}, answer: "attacked" });
+    expect(routeQuestion("Alert me when a piece is undefended.")).toMatchObject({ answer: "attacked" });
+    expect(routeQuestion("Is anything hanging?")).toMatchObject({ answer: "attacked" });
+    expect(routeQuestion("Is my queen under attack?")).not.toHaveProperty("answer"); // one piece: the model answers yes or no
+    expect(routeQuestion("Which of my opponent's pieces are attacked?")).not.toHaveProperty("answer");
+    expect(attackedAnswer({ yourPiecesUnderAttack: [] })).toBe("Nothing of yours is under attack right now.");
+    expect(attackedAnswer({ yourPiecesUnderAttack: [] }, true)).toBe("Nothing of yours is under attack right now. I won't call it out by myself, but ask me any time.");
+    expect(attackedAnswer({ yourPiecesUnderAttack: ["queen on h5 (attacked by my pawn)", "bishop on c4 (attacked by my knight)"] }))
+      .toBe("Your queen on h5 is attacked by my pawn, and your bishop on c4 by my knight.");
+  });
+
+  it("always says her move, even when the model leaves it out", async () => {
+    const result = { yourMoveSpoken: "pawn to a3", engineMoveSpoken: "queen takes queen on d1", commentary: {} };
+    expect(saysMove("Pawn to a3. A free piece? Don't mind if I do.", result)).toBe(false);
+    expect(saysMove("Pawn to a3. I take your queen on d1. Thanks!", result)).toBe(true);
+    expect(saysMove("Rook takes queen on d1. Nice.", { yourMoveSpoken: "rook takes queen on d1", engineMoveSpoken: "pawn takes rook on d1" })).toBe(false);
+    expect(saysMove("Castles kingside. I castle too.", { yourMoveSpoken: "castles kingside", engineMoveSpoken: "castles kingside" })).toBe(true);
+    // Through runTurn in chatty mode: the template replaces the reply that skipped her move.
+    const sessions = new MemorySessionStore();
+    await gameSession(sessions, "s-move");
+    await sessions.put({ ...(await sessions.get("s-move"))!, chattiness: "chatty" });
+    const tools: ChessTools = { listTools: async () => MCP_TOOLS, callTool: async () => ({ isError: false, data: { ...result, gameOver: false } }) };
+    const s = scriptedConverse([say("Pawn to a3. A free piece? Don't mind if I do.")]);
+    const r = await runTurn({ converse: s.converse, tools, sessions, modelId: "m" }, "s-move", "pawn a3");
+    expect(r.reply).toMatch(/^Pawn to a3[.;,] .*queen takes queen on d1\./);
+    // Chatty: the model only adds the reaction line after the template's moves.
+    const s2 = scriptedConverse([say("A free piece? Don't mind if I do.")]);
+    const r2 = await runTurn({ converse: s2.converse, tools, sessions, modelId: "m" }, "s-move", "pawn a3");
+    expect(r2.reply).toMatch(/^(?:Pawn to a3|You play pawn to a3)[.;,] .*queen takes queen on d1\. A free piece\? Don't mind if I do\.$/);
+  });
+
+  it("never says a talking-point label out loud", () => {
+    expect(cleanSpeech("Pawn to a3. I play pawn to f6. Quiet move.")).toBe("Pawn to a3. I play pawn to f6.");
+    expect(cleanSpeech("Bishop to b5, check. I play king to d8. Nothing big happened.")).toBe("Bishop to b5, check. I play king to d8.");
+    expect(cleanSpeech("That's a quiet move that keeps your options open.")).toBe("That's a quiet move that keeps your options open.");
+  });
+
+  it("never speaks the model's own reasoning", () => {
+    expect(REASONING_LEAK.test("Okay, let's break this down. The user asked me to describe the current board.")).toBe(true);
+    expect(REASONING_LEAK.test("I called the readboard function with format ranks.")).toBe(true);
+    expect(REASONING_LEAK.test("You have king e1, queen d1. I have king e8.")).toBe(false);
   });
 
   it("lets the model ignore overheard words that got past the filter", async () => {
@@ -537,14 +650,17 @@ describe("Phase 6: background speech, speed and shorter answers", () => {
     expect(calls).toHaveLength(1);
   });
 
-  it("builds move replies without the model: moves first, then one fact that matters", () => {
+  it("builds move replies without the model: moves first, then one jab, compliment or opening", () => {
     const base = { yourMoveSpoken: "knight to f3", engineMoveSpoken: "pawn to d5" };
     expect(quickMoveReply({ ...base, commentary: {} }, "brief", 0)).toBe("Knight to f3. I play pawn to d5.");
-    expect(quickMoveReply({ ...base, commentary: { alerts: ["your bishop on c4 is under attack by a pawn"] } }, "brief", 0)).toBe("Knight to f3. I play pawn to d5. Careful, your bishop on c4 is under attack by a pawn.");
-    expect(quickMoveReply({ ...base, commentary: { yourMove: { quality: "blunder", betterWas: "pawn to e4" } } }, "brief", 0)).toBe("Knight to f3. I play pawn to d5. That was a blunder; pawn to e4 was better.");
+    // No unasked warnings or better moves any more (2026-10-17).
+    expect(quickMoveReply({ ...base, commentary: { alerts: ["your bishop on c4 is under attack by a pawn"] } }, "brief", 0)).toBe("Knight to f3. I play pawn to d5.");
+    expect(quickMoveReply({ ...base, commentary: { yourMove: { quality: "blunder", betterWas: "pawn to e4" } } }, "brief", 0, "Ouch! That was expensive.")).toBe("Knight to f3. I play pawn to d5. Ouch! That was expensive.");
+    expect(quickMoveReply({ ...base, commentary: { opening: { name: "Zukertort Opening" } } }, "brief", 0, "Well played!")).toBe("Knight to f3. I play pawn to d5. Well played!");
+    expect(quickMoveReply({ ...base, commentary: {} }, "minimal", 0, "Well played!")).toBe("Knight to f3. I play pawn to d5.");
     expect(quickMoveReply({ ...base, commentary: { opening: { name: "Zukertort Opening" } } }, "brief", 1)).toBe("Knight to f3; I answer pawn to d5. This is the Zukertort Opening.");
     expect(quickMoveReply({ ...base, commentary: { opening: { name: "Zukertort Opening" } } }, "minimal", 0)).toBe("Knight to f3. I play pawn to d5.");
-    expect(quickMoveReply({ yourMoveSpoken: "queen to h7, checkmate", gameOverText: "Checkmate. You win!" }, "minimal", 0)).toBe("Queen to h7, checkmate. Checkmate. You win!");
+    expect(quickMoveReply({ yourMoveSpoken: "queen to h7, checkmate", gameOverText: "Checkmate. You win!" }, "minimal", 0)).toBe("Queen to h7, checkmate. You win!");
   });
 
   it("confirms each move before playing it when asked to", async () => {
@@ -597,7 +713,65 @@ describe("Phase 6: background speech, speed and shorter answers", () => {
     const r = await runTurn({ converse: s.converse, tools, sessions, modelId: "m" }, "s-ans", "what is en passant");
     expect(calls).toHaveLength(0);
     expect(s.calls).toHaveLength(1);
-    expect(r.reply).toBe("En passant lets a pawn capture another pawn that just jumped two squares past it. It must be done right away. It's rare.");
+    expect(r.reply).toBe("En passant lets a pawn capture another pawn that just jumped two squares past it. It must be done right away.");
+  });
+});
+
+describe("Phase 8: a rival, not a coach, and short replies (2026-10-17)", () => {
+  it("caps any reply by words, at a sentence or a comma", () => {
+    expect(capWords("One two three. Four five six.", 10)).toBe("One two three. Four five six.");
+    expect(capWords("One two three. Four five six.", 4)).toBe("One two three.");
+    const list = "Your queen can play: queen to c4, queen to b5, queen to a6, queen to e4, queen to f5, queen to g6, queen takes pawn on h7.";
+    expect(capWords(list, 12)).toBe("Your queen can play: queen to c4, queen to b5.");
+  });
+
+  it("names the new strengths", () => {
+    expect(LEVEL_NAMES[2]).toMatch(/easy, about 800/);
+    expect(LEVEL_NAMES[4]).toMatch(/medium, about 1500/);
+    expect(LEVEL_NAMES[6]).toMatch(/hard, about 2500/);
+  });
+
+  it("jabs a blunder on a move turn without any model call, and never warns", async () => {
+    const sessions = new MemorySessionStore();
+    await gameSession(sessions, "s-jab");
+    const tools: ChessTools = {
+      listTools: async () => MCP_TOOLS,
+      callTool: async () => ({
+        isError: false,
+        data: {
+          yourMoveSpoken: "bishop to a6", engineMoveSpoken: "pawn on b7 takes bishop on a6", gameOver: false,
+          commentary: { yourMove: { quality: "blunder", lossCp: 320, betterWas: "knight to f3" }, alerts: ["your knight on c3 is under attack by a pawn"] },
+          moveFacts: { yourPiece: "bishop", myPiece: "pawn", iCaptured: "bishop", materialChange: -3, materialBalance: -3, phase: "opening" },
+        },
+      }),
+    };
+    const s = scriptedConverse([]);
+    const r = await runTurn({ converse: s.converse, tools, sessions, modelId: "m" }, "s-jab", "bishop a6");
+    expect(s.calls).toHaveLength(0);
+    expect(r.reply).toMatch(/^Bishop to a6[.;,] .*pawn on b7 takes bishop on a6\. .+/);
+    expect(r.reply).not.toMatch(/careful|under attack|was better|knight to f3/i);
+    expect((await sessions.get("s-jab"))!.banter!.used).toHaveLength(1);
+  });
+
+  it("after an undo, 'what should I have played?' is the engine's best move here", async () => {
+    const sessions = new MemorySessionStore();
+    await gameSession(sessions, "s-undo");
+    const calls: string[] = [];
+    const tools: ChessTools = {
+      listTools: async () => MCP_TOOLS,
+      callTool: async (name) => {
+        calls.push(name);
+        if (name === "undo") return { isError: false, data: { speech: "Took back bishop to a6. It's your move as White." } };
+        if (name === "hint") return { isError: false, data: { speech: "The best move here, according to the engine, would be knight to f3." } };
+        return { isError: false, data: { speech: "ok" } };
+      },
+    };
+    const s = scriptedConverse([use("undo", {})]);
+    await runTurn({ converse: s.converse, tools, sessions, modelId: "m" }, "s-undo", "undo");
+    expect((await sessions.get("s-undo"))!.justUndid).toBe(true);
+    const r = await runTurn({ converse: scriptedConverse([]).converse, tools, sessions, modelId: "m" }, "s-undo", "what should I have played?");
+    expect(calls).toEqual(["undo", "hint"]);
+    expect(r.reply).toBe("The best move here, according to the engine, would be knight to f3.");
   });
 });
 
@@ -689,7 +863,7 @@ describe("question router", () => {
     // Found by the 305-question eval:
     expect(routeQuestion("Can I castle while in check?")).toBeUndefined(); // a rule, not this position
     expect(routeQuestion("Can I castle through an attacked square?")).toBeUndefined();
-    expect(routeQuestion("What move should I avoid?")).toBeUndefined(); // not a hint
+    expect(routeQuestion("What move should I avoid?")?.name).toBe("analyze_position"); // not a hint: the risk
     expect(routeQuestion("What is the safest move?")).toEqual({ name: "hint", args: { count: 3, reveal: true }, phrase: true });
     expect(routeQuestion("Which of my pieces is misplaced?")?.name).toBe("analyze_position");
     expect(routeQuestion("Is my rook trapped?")?.name).toBe("analyze_position");

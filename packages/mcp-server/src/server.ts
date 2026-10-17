@@ -4,6 +4,7 @@ import { Chess, type Color, type Move, type Square } from "chess.js";
 import * as z from "zod";
 import {
   IllegalMoveError,
+  PIECE_WORDS,
   describeSquare,
   legalMovesSpoken,
   material,
@@ -52,7 +53,7 @@ import {
 } from "./chess/analysis.js";
 import { currentOpening } from "./chess/openings.js";
 import { confirmQuestion, isCastleChoice, readSpecs, resolveSpokenMove } from "./chess/spokenMove.js";
-import { PIECE_NAMES, colorName, spokenMove, spokenPieceList } from "./chess/spoken.js";
+import { PIECE_NAMES, colorName, compactPieceList, joinOr, spokenMove, spokenPieceList } from "./chess/spoken.js";
 import type { GameRecord, GameStore, MoveRecord } from "./store.js";
 
 export interface Engine {
@@ -60,8 +61,8 @@ export interface Engine {
   best(uciMoves: string[], startFen?: string): Promise<string>;
   /** Quick full-strength evaluation for commentary. */
   analyse(uciMoves: string[], startFen?: string): Promise<SearchResult>;
-  /** Top moves with scores for any position (MultiPV), for analysis questions. */
-  top(fen: string, count?: number, movetimeMs?: number): Promise<Line[]>;
+  /** Top moves with scores for any position (MultiPV), for analysis questions; `searchMoves` limits it (UCI). */
+  top(fen: string, count?: number, movetimeMs?: number, searchMoves?: string[]): Promise<Line[]>;
 }
 
 export interface Deps {
@@ -90,6 +91,9 @@ class UserFacingError extends Error {}
 const SAN_LIKE = /^(?:[KQRBN]?[a-h]?[1-8]?x?[a-h][1-8](?:=[QRBN])?|O-O(?:-O)?|[a-h][1-8][a-h][1-8][qrbn]?)[+#]?$/;
 
 const gameIdSchema = z.string().min(1).describe("The gameId returned by new_game.");
+
+/** Half-moves read out at most by last_moves, and by game_history unless the whole game was asked for. */
+const MAX_RECENT_PLIES = 6;
 
 const SERVER_INSTRUCTIONS = `Blind chess for voice assistants. The user cannot see a board.
 Start with new_game, then pass its gameId to every other tool. make_move plays the user's move and returns
@@ -320,6 +324,7 @@ export function createChessServer(deps: Deps): McpServer {
           .map((m) => m.evalCp!);
         const materialBefore = materialBalance(chess, game.humanColor);
         const alertsBefore = new Set(alertsFor(chess, game.humanColor)); // already warned about last turn
+        const wasInCheck = chess.inCheck();
 
         // Evaluate before and after the user's move to judge it.
         const openingBefore = currentOpening(chess)?.name;
@@ -384,6 +389,31 @@ export function createChessServer(deps: Deps): McpServer {
           material: materialAfter !== materialBefore ? spokenMaterial(materialAfter) : undefined,
           alerts: alertsFor(chess, game.humanColor).filter((a) => !alertsBefore.has(a) || /^your (queen|rook)/.test(a)),
         };
+        // Plain facts about this turn, for the assistant's jabs and compliments (which piece, who won material, check,
+        // the phase): it may only tease or praise what really happened.
+        const result = statusOf(chess);
+        const userWins = result.status === "checkmate" && (result.result === "1-0") === (game.humanColor === "w");
+        const moveFacts = {
+          yourPiece: PIECE_NAMES[human.piece],
+          youCaptured: human.captured ? PIECE_NAMES[human.captured] : undefined,
+          youGaveCheck: /[+#]$/.test(human.san),
+          myPiece: reply ? PIECE_NAMES[reply.move.piece] : undefined,
+          iCaptured: reply?.move.captured ? PIECE_NAMES[reply.move.captured] : undefined,
+          iGaveCheck: !!reply && /[+#]$/.test(reply.move.san),
+          /** I took the piece the user just moved: their "fork" or capture didn't survive. */
+          iTookYourPiece: !!reply?.move.captured && reply.move.to === human.to,
+          /** Material over the whole turn (both moves), from the user's side: -3 = I won a piece. */
+          materialChange: materialAfter - materialBefore,
+          materialBalance: materialAfter,
+          /** Evaluation after the user's move, user's side, centipawns. */
+          evalForYou: evalCp,
+          wasInCheck,
+          hadPieceAttacked: alertsBefore.size > 0,
+          phase: phase(chess),
+          // One step from queening: "That promotion threat is serious" two squares away sounded wrong in the sim.
+          myPawnNearPromotion: !!reply && reply.move.piece === "p" && !reply.move.promotion && reply.move.to[1] === (reply.move.color === "w" ? "7" : "2"),
+          winner: result.status === "active" ? undefined : result.status === "checkmate" ? (userWins ? "you" : "me") : "draw",
+        };
 
         return ok({
           speech,
@@ -394,6 +424,7 @@ export function createChessServer(deps: Deps): McpServer {
           gameOverText: over || undefined,
           heardAs: resolution.via === "exact" ? undefined : resolution.heard,
           commentary,
+          moveFacts,
           status: game.status,
           result: game.result,
           gameOver: game.status !== "active",
@@ -483,7 +514,9 @@ export function createChessServer(deps: Deps): McpServer {
           pieces = pieces.filter((p) => p.type === letter);
           if (pieces.length === 0) return ok({ speech: `${color === "white" ? "White" : "Black"} has no ${piece} left.` });
         }
-        return ok({ speech: `${color === "white" ? "White" : "Black"} has ${spokenPieceList(pieces)}.`, pieces });
+        // One kind of piece reads best with "on" ("queen on d8"); a whole side uses the short read-out form.
+        const list = piece ? spokenPieceList(pieces) : compactPieceList(pieces);
+        return ok({ speech: `${color === "white" ? "White" : "Black"} has ${list}.`, pieces });
       }),
   );
 
@@ -498,7 +531,7 @@ export function createChessServer(deps: Deps): McpServer {
     ({ gameId, format }) =>
       guard(async () => {
         const { game, chess } = await load(gameId);
-        return ok({ speech: `${readBoard(chess, format)} ${sideToMoveSpoken(chess, game.humanColor)}`, fen: chess.fen() });
+        return ok({ speech: `${readBoard(chess, format, game.humanColor)} ${sideToMoveSpoken(chess, game.humanColor)}`, fen: chess.fen() });
       }),
   );
 
@@ -514,7 +547,7 @@ export function createChessServer(deps: Deps): McpServer {
       guard(async () => {
         const { moves } = await load(gameId);
         if (moves.length === 0) return ok({ speech: "No moves have been played yet.", moves: [] });
-        const recent = moves.slice(-count);
+        const recent = moves.slice(-Math.min(count, MAX_RECENT_PLIES)); // more is a monologue: game_history has the rest
         const speech = recent
           .map((m) => `Move ${m.moveNumber}, ${m.by === "human" ? "you" : "I"} played ${m.spoken}.`)
           .join(" ");
@@ -548,20 +581,25 @@ export function createChessServer(deps: Deps): McpServer {
     {
       title: "Suggest a move",
       description:
-        "The engine's best move for the user at full strength, with the idea behind it. Does not play it. count: 1 (default, 'what should I play', 'any suggestion') up to 3 only when they ask for several ('my three best moves'). reveal: false for 'a small hint without giving it away' (names only the piece and the idea).",
+        "The engine's best move for the user (only the user's own moves, never mine) at full strength. Does not play it. count: 1 (default, 'what should I play', 'any suggestion') up to 3 only when they ask for several ('my three best moves'). reveal: false for 'a small hint without giving it away' (names only the piece and the idea). piece: only that piece's moves ('the best move for my knight').",
       inputSchema: z.object({
         gameId: gameIdSchema,
         count: z.number().int().min(1).max(3).default(1),
         reveal: z.boolean().default(true),
+        piece: z.string().optional().describe("pawn, knight, bishop, rook, queen or king: the best move of that piece only."),
       }),
       annotations: { readOnlyHint: true },
     },
-    ({ gameId, count, reveal }) =>
+    ({ gameId, count, reveal, piece }) =>
       guard(async () => {
         const { game, chess } = await load(gameId);
         if (game.status !== "active") throw new UserFacingError("The game is over, so there's nothing to suggest.");
         if (chess.turn() !== game.humanColor) throw new UserFacingError("It's my move right now; ask again on your turn.");
-        const lines = await engine.top(chess.fen(), count, 500);
+        // "The best move for my knight": the engine searches only that piece's moves.
+        const type = piece ? PIECE_WORDS[piece.toLowerCase().trim()] : undefined;
+        const pieceMoves = type ? chess.moves({ verbose: true }).filter((m) => m.piece === type).map((m) => moveToUci(m)) : undefined;
+        if (type && !pieceMoves?.length) throw new UserFacingError(`Your ${PIECE_NAMES[type]} has no legal move right now.`);
+        const lines = await engine.top(chess.fen(), Math.min(count, pieceMoves?.length ?? count), 500, pieceMoves);
         const options = lines.slice(0, count).map((l) => {
           const c = new Chess(chess.fen());
           const m = c.move(uciToObject(l.move));
@@ -569,16 +607,17 @@ export function createChessServer(deps: Deps): McpServer {
         });
         if (options.length === 0) throw new UserFacingError("You have no legal moves.");
         const best = options[0];
-        const idea = best.ideas[0] ? `: it ${best.ideas[0]}` : "";
+        // Just the engine's move, no lesson: only asked-for coaching (2026-10-17, "say the best move here according to
+        // the engine would be").
         let speech: string;
         if (!reveal) {
           // Where to look and why, never the square: "Look at your knight on the kingside: it can attack my queen."
           const area = /^[a-c]/.test(best.from) ? "on the queenside" : /^[d-e]/.test(best.from) ? "in the centre" : "on the kingside";
-          const vague = best.ideas.map((i) => i.replace(/ on [a-h][1-8]/g, "").replace(/^attacks the/, "can attack my").replace(/^captures/, "can capture").replace(/^gives check/, "can give check").replace(/^develops the \w+/, "wants to come into play").replace(/^stakes a claim in the centre/, "can grab the centre")).find(Boolean);
+          const vague = best.ideas.map((i) => i.replace(/ on [a-h][1-8]/g, "").replace(/^forks the (\w+) and the/, "can fork my $1 and").replace(/^attacks the/, "can attack my").replace(/^captures/, "can capture").replace(/^gives check/, "can give check").replace(/^develops the \w+/, "wants to come into play").replace(/^stakes a claim in the centre/, "can grab the centre")).find(Boolean);
           const why = vague ?? (best.flags.includes("k") || best.flags.includes("q") ? "your king wants safety" : best.piece === "pawn" ? "it can gain space" : "it has a strong move");
           speech = best.piece === "king" && (best.flags.includes("k") || best.flags.includes("q")) ? "Think about your king's safety." : `Look at your ${best.piece} ${area}: ${vague ? `it ${vague}` : why}.`;
-        } else if (count === 1) speech = `Try ${best.spoken}${idea}.`;
-        else speech = `Best is ${best.spoken}${idea}. Also good: ${options.slice(1).map((o) => o.spoken).join(", and ")}.`;
+        } else if (count === 1) speech = `The best ${type ? `${PIECE_NAMES[type]} ` : ""}move here, according to the engine, would be ${best.spoken}.`;
+        else speech = `According to the engine, the best moves are ${joinOr(options.map((o) => o.spoken))}.`;
         return ok({ speech, options: reveal ? options : [{ piece: best.piece, ideas: best.ideas.map((i) => i.replace(/ on [a-h][1-8]/g, "")) }], reveal });
       }),
   );
@@ -713,10 +752,10 @@ export function createChessServer(deps: Deps): McpServer {
             mine: lastEngine ? { move: lastEngine.spoken, moveNumber: lastEngine.moveNumber, ideas: myLastIdeas } : undefined,
           },
         };
+        // No best move here: the move is only named when they ask for it (hint), never slipped into an answer.
         const speech = [
           evaluation ? `Position: ${evaluation.says}.` : "",
           threat?.serious ? `I'm threatening ${threat.myBestMoveIfIgnored}.` : "",
-          bestMoves[0] ? `Best for you is ${bestMoves[0].move}.` : "",
         ].filter(Boolean).join(" ") || "Here's the position.";
         return ok({ speech, ...facts });
       }),
@@ -775,8 +814,11 @@ export function createChessServer(deps: Deps): McpServer {
           myReply = spokenMove(r);
         }
         const hangs = hangingPieces(c, user).map((h) => `${PIECE_NAMES[h.piece]} on ${h.square}`);
+        // Two sentences at most: the verdict (with what it leaves hanging, if anything), then my reply.
+        const bad = quality === "inaccuracy" || quality === "mistake" || quality === "blunder";
         const verdict = !quality ? "" : quality === "best or as good" ? ", and it's a strong move" : quality === "good" ? ", and it's fine" : `, but it would be a ${quality}`;
-        const speech = `Yes, ${spokenMove(m)} is legal${verdict}.${myReply ? ` I'd answer ${myReply}.` : ""}${hangs.length && quality !== "best or as good" ? ` It would leave your ${hangs[0]} hanging.` : ""}`;
+        const hanging = bad && hangs.length ? `: it leaves your ${hangs[0]} hanging` : "";
+        const speech = `Yes, ${spokenMove(m)} is legal${verdict}${hanging}.${myReply ? ` I'd answer ${myReply}.` : ""}`;
         return ok({ speech, legal: true, move: spokenMove(m), san: m.san, whatItDoes: ideas, quality, evaluationAfter: afterEval.says, comparedWithBest: nowEval?.says, leavesHanging: hangs, myBestReply: myReply });
       }),
   );
@@ -876,7 +918,7 @@ export function createChessServer(deps: Deps): McpServer {
         if (!lastHuman) throw new UserFacingError("There's no move of yours to take back.");
         const removed = moves.filter((m) => m.ply >= lastHuman.ply);
         await store.deleteMoves(gameId, removed.map((m) => m.ply));
-        const chess = replay(moves.filter((m) => m.ply < lastHuman.ply).map((m) => m.uci));
+        const chess = replay(moves.filter((m) => m.ply < lastHuman.ply).map((m) => m.uci), game.startFen);
         await saveState(game, chess, { status: "active", result: undefined, reason: undefined });
         return ok({ speech: `Took back ${lastHuman.spoken}. ${sideToMoveSpoken(chess, game.humanColor)}`, fen: chess.fen() });
       }),
@@ -904,11 +946,15 @@ export function createChessServer(deps: Deps): McpServer {
     "game_history",
     {
       title: "Game history",
-      description: "Full move history of a game (PGN and spoken). Without a gameId, lists recent games.",
-      inputSchema: z.object({ gameId: gameIdSchema.optional(), limit: z.number().int().min(1).max(20).default(5) }),
+      description: "Move history of a game (PGN and spoken): the move count and the last few moves, or every move with full: true (only when they ask for the whole game read out). Without a gameId, lists recent games.",
+      inputSchema: z.object({
+        gameId: gameIdSchema.optional(),
+        limit: z.number().int().min(1).max(20).default(5),
+        full: z.boolean().default(false).describe("true only for 'read me the whole game / all the moves'."),
+      }),
       annotations: { readOnlyHint: true },
     },
-    ({ gameId, limit }) =>
+    ({ gameId, limit, full }) =>
       guard(async () => {
         if (!gameId) {
           const games = await store.listGames(limit);
@@ -925,9 +971,11 @@ export function createChessServer(deps: Deps): McpServer {
         chess.setHeader("Date", game.createdAt.slice(0, 10).replace(/-/g, "."));
         if (game.result) chess.setHeader("Result", game.result);
         const byNumber = new Map<number, MoveRecord[]>();
-        for (const m of moves) byNumber.set(m.moveNumber, [...(byNumber.get(m.moveNumber) ?? []), m]);
+        const readOut = full ? moves : moves.slice(-MAX_RECENT_PLIES);
+        for (const m of readOut) byNumber.set(m.moveNumber, [...(byNumber.get(m.moveNumber) ?? []), m]);
         const spoken = [...byNumber.entries()].map(([n, ms]) => `${n}. ${ms.map((m) => `${colorName(m.color)} ${m.spoken}`).join(", ")}.`);
-        const speech = moves.length ? `${moves.length} half-moves. ${spoken.join(" ")}` : "No moves have been played yet.";
+        const lead = readOut.length < moves.length ? `${moves.length} half-moves so far. The last ones:` : `${moves.length} half-moves.`;
+        const speech = moves.length ? `${lead} ${spoken.join(" ")}` : "No moves have been played yet.";
         return ok({ speech, pgn: chess.pgn(), status: game.status, result: game.result, moves });
       }),
   );

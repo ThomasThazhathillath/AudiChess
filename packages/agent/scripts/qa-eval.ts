@@ -6,6 +6,7 @@ import { runTurn, type AgentDeps, type TurnResult } from "../src/agent.js";
 import { McpChessTools } from "../src/mcpClient.js";
 import { MemorySessionStore, type Session } from "../src/sessions.js";
 import { QUESTIONS, type Question, type ScenarioId } from "../eval/questions.js";
+import { PRICES, estimateCost } from "./converse-eval.js";
 
 // Question-answering eval: each of the user's 305 questions is asked in a position that fits it (fresh game per
 // question), through the real agent (Bedrock + the local chess MCP server), and graded by a stronger model that
@@ -157,6 +158,7 @@ interface Row {
   tools: string[];
   ms: number;
   timings?: TurnResult["timings"];
+  usage?: TurnResult["usage"];
   sentences: number;
   verdict?: Record<string, unknown>;
   error?: string;
@@ -180,7 +182,7 @@ async function runOne(q: Question): Promise<Row> {
     const ms = Date.now() - t;
     const row: Row = {
       n: q.n, category: q.category, question: q.text, scenario: q.scenario, reply: r.reply, ignored: r.ignored,
-      tools: r.toolCalls.map((c) => `${c.name}${c.isError ? "!" : ""}`), ms, timings: r.timings,
+      tools: r.toolCalls.map((c) => `${c.name}${c.isError ? "!" : ""}`), ms, timings: r.timings, usage: r.usage,
       sentences: r.reply ? r.reply.split(/(?<=[.!?])\s+/).length : 0,
     };
     if (doJudge) row.verdict = await judge(q, sc.describe, truth, r.reply, row.tools);
@@ -218,6 +220,12 @@ for (const c of cats) {
   console.log(`${c.padEnd(30)}${String(pct(pass, rs.length)).padStart(3)}%  ${(rs.reduce((s, r) => s + r.ms, 0) / rs.length / 1000).toFixed(1).padStart(5)}   ${(rs.reduce((s, r) => s + r.sentences, 0) / rs.length).toFixed(1).padStart(5)}`);
 }
 console.log(`${"ALL".padEnd(30)}${String(pct(passAll, rows.length)).padStart(3)}%  ${(rows.reduce((s, r) => s + r.ms, 0) / rows.length / 1000).toFixed(1).padStart(5)}   (${passAll}/${rows.length})`);
+// What the agent's model calls cost (the judge's calls are not counted), at the prices billed in ap-south-1.
+const used = rows.reduce((s, r) => ({ inputTokens: s.inputTokens + (r.usage?.inputTokens ?? 0), outputTokens: s.outputTokens + (r.usage?.outputTokens ?? 0), cacheReadTokens: s.cacheReadTokens + (r.usage?.cacheReadTokens ?? 0), cacheWriteTokens: s.cacheWriteTokens + (r.usage?.cacheWriteTokens ?? 0), rounds: s.rounds + (r.usage?.rounds ?? 0) }), { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, rounds: 0 });
+const cost = estimateCost(used, PRICES[MODEL_ID]);
+const words = rows.map((r) => (r.reply ? r.reply.split(/\s+/).length : 0)).sort((a, b) => a - b);
+console.log(`agent: ${used.rounds} model calls, ${used.inputTokens} in + ${used.outputTokens} out + ${used.cacheReadTokens} cache read${cost !== undefined ? `, about $${cost.toFixed(3)}` : ""}`);
+console.log(`words per answer: avg ${(words.reduce((s, w) => s + w, 0) / Math.max(1, words.length)).toFixed(1)}, p50 ${words[words.length >> 1]}, p90 ${words[Math.floor(words.length * 0.9)]}, max ${words[words.length - 1]}`);
 mkdirSync(OUT_DIR, { recursive: true });
 const file = join(OUT_DIR, `qa-${new Date().toISOString().replace(/[:.]/g, "-")}-${LABEL}.json`);
 writeFileSync(file, JSON.stringify({ model: MODEL_ID, judge: JUDGE_ID, rows }, null, 2));

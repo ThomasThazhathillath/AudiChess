@@ -46,6 +46,12 @@ describe("threats and ideas", () => {
     const d = new Chess();
     expect(moveIdeas(d.move("Nf3"), d)).toContain("develops the knight");
   });
+  it("names forks: two targets, or check plus one", () => {
+    const k = new Chess("r3k3/8/8/1N6/8/8/8/4K3 w - - 0 1");
+    expect(moveIdeas(k.move("Nc7+"), k)).toContain("forks the king and the rook on a8");
+    const two = new Chess("4k3/8/1q3r2/8/8/2N5/8/4K3 w - - 0 1");
+    expect(moveIdeas(two.move("Nd5"), two)).toContain("forks the queen on b6 and the rook on f6");
+  });
 });
 
 describe("game flow facts", () => {

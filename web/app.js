@@ -6,7 +6,7 @@
   const device = $("device"), live = $("live"), startEl = $("start"), startBtn = $("start-btn"), startNote = $("start-note");
   const debugEl = $("debug"), debugLog = $("debug-log"), langSel = $("lang");
 
-  const BUILD = "openmic-1"; // shown in the debug drawer, to confirm which code the browser runs
+  const BUILD = "rival-1"; // shown in the debug drawer, to confirm which code the browser runs
 
   const params = new URLSearchParams(location.search);
   // Speech-to-text: Chrome's own recognizer, one phrase at a time (default), or Amazon Transcribe streaming
@@ -320,46 +320,57 @@
   let recognition = null;
   let listening = false;
   let wantListening = false;
-  let restartDelay = 250;
+  const RESTART_MS = 100;    // after a phrase or a silence (was 250: words said in the gap were lost)
+  let restartDelay = RESTART_MS;
   let speechAt = 0;          // first interim result of the utterance in progress
-  const cycleNote = (text) => { if (VERBOSE) logNote(text); }; // every few seconds in silence: only with ?verbose
+  let lastRecEventAt = 0;    // any event from the recognizer, for the watchdog
+  let renewWhy = "";         // a real error: the next "end" builds a fresh recognizer
+  // Every mic cycle (on, sound, speech, no-speech): on screen only with ?verbose, but always in the local mirror log,
+  // so a deaf spell can be read afterwards (2026-10-17's couldn't: Chrome heard nothing, or sound but no speech?).
+  const cycleNote = (text) => { if (VERBOSE) logNote(text); else mirrorLog(`${new Date().toLocaleTimeString()} · ${text}`); };
 
-  if (Recognition) {
-    recognition = new Recognition();
-    recognition.continuous = false;
-    recognition.interimResults = true; // live captions and the start time only; just the final phrase is sent
-    recognition.maxAlternatives = 5;   // n-best readings for the spoken-move matcher
-    // No `recognition.phrases` biasing: Chrome exposes it, but its cloud recognizer then fails every start with
+  /**
+   * A recognizer with all its handlers. Rebuilt when Chrome's goes deaf (speech detected but no words, twice), after a
+   * real error, or when it stops sending events: the old object is dropped, and its late events are ignored.
+   */
+  function makeRecognition() {
+    const r = new Recognition();
+    r.continuous = false;
+    r.interimResults = true; // live captions and the start time only; just the final phrase is sent
+    r.maxAlternatives = 5;   // n-best readings for the spoken-move matcher
+    // No `phrases` biasing: Chrome exposes it, but its cloud recognizer then fails every start with
     // "phrases-not-supported" (only on-device recognition supports it), which killed the wake word.
+    const on = (fn) => (e) => { if (r !== recognition) return; lastRecEventAt = Date.now(); fn(e); };
 
-    recognition.onstart = () => { listening = true; restartDelay = 250; speechAt = 0; heardSpeech = false; gotWords = false; cycleNote("mic on"); };
-    recognition.onend = () => {
+    r.onstart = on(() => { listening = true; restartDelay = RESTART_MS; speechAt = 0; heardSpeech = false; gotWords = false; cycleNote("mic on"); });
+    r.onend = on(() => {
       listening = false;
-      checkLanguageHealth();
+      if (renewWhy) { const why = renewWhy; renewWhy = ""; return renewRecognition(why); }
+      if (checkLanguageHealth()) return renewRecognition("speech detected twice but no words");
       cycleNote(`mic off${speaking ? " (Alexa speaking)" : busy ? " (thinking)" : muted ? " (muted)" : ", restarting"}`);
       // After each phrase, a silence or a network hiccup: open the mic again unless she's busy (send() reopens it).
       if (wantListening && !muted && !speaking && !busy) setTimeout(startListening, restartDelay);
-    };
-    // Diagnostics: show how far Chrome gets each cycle (audio captured -> sound -> speech -> result).
-    recognition.onaudiostart = () => cycleNote("audio capture started");
-    recognition.onsoundstart = () => cycleNote("sound detected");
-    recognition.onspeechstart = () => { heardSpeech = true; cycleNote("speech detected"); };
-    recognition.onaudioend = () => cycleNote("audio capture ended");
-    recognition.onnomatch = () => logNote("speech heard but not recognised");
-    recognition.onerror = (e) => {
+    });
+    // Diagnostics: how far Chrome gets each cycle (audio captured -> sound -> speech -> result).
+    r.onaudiostart = on(() => cycleNote("audio capture started"));
+    r.onsoundstart = on(() => cycleNote("sound detected"));
+    r.onspeechstart = on(() => { heardSpeech = true; cycleNote("speech detected"); });
+    r.onaudioend = on(() => cycleNote("audio capture ended"));
+    r.onnomatch = on(() => logNote("speech heard but not recognised"));
+    r.onerror = on((e) => {
       if (e.error === "no-speech" || e.error === "aborted") return cycleNote(`recognition: ${e.error}`); // silence, or we stopped it
       logNote(`recognition error: ${e.error}${e.message ? ` (${e.message})` : ""}`);
       if (e.error === "not-allowed" || e.error === "service-not-allowed") {
-        wantListening = false;
-        setState("error", "Microphone access is blocked. Allow it in the browser settings and reload.");
+        // Not only "blocked": it came after 7 quiet minutes on 2026-10-17 and switched the mic off for good. Muted
+        // instead, so a tap (a user gesture Chrome accepts) turns it back on.
+        if (!muted) toggleMute();
+        setState("muted", "Microphone off. Tap the speaker to turn it back on.");
         return;
       }
-      if (e.error !== "no-speech" && e.error !== "aborted") {
-        logNote(`mic error: ${e.error}`);
-        restartDelay = Math.min(restartDelay * 2, 5000);
-      }
-    };
-    recognition.onresult = (e) => {
+      restartDelay = Math.min(restartDelay * 2, 5000);
+      renewWhy = `after "${e.error}"`;
+    });
+    r.onresult = on((e) => {
       lastChromeAt = Date.now();
       gotWords = true;
       if (speaking || busy || muted) { // half-duplex: never react to our own voice
@@ -374,6 +385,8 @@
         if (!result.isFinal) {
           DS?.hearing(top.trim());
           if (!speechAt) { speechAt = Date.now(); logNote(`hearing "${top.trim()}"…`); } // counts even if Chrome finalises later
+          // Still talking: a held "bishop…" waits for the rest ("f4" was being said when the hold ran out, 2026-10-17).
+          if (held) { clearTimeout(held.timer); held.timer = setTimeout(flushHeld, HOLD_MS); }
           // Light the ring the moment the wake word is heard, like a real Echo.
           if (WAKE.test(top) && device.dataset.state === "idle") { earcon.wake(); setState("awake", "Listening"); }
           // No forced early finals: ending an utterance after a 1.3 s pause (and restarting the mic) cut
@@ -385,8 +398,46 @@
         handleUtterance(alts, speechAt);
         speechAt = 0;
       }
-    };
+    });
+    return r;
   }
+
+  /** Swap in a fresh recognizer (the old one is aborted and its late events ignored), then listen again. */
+  function renewRecognition(why) {
+    if (!Recognition) return;
+    const old = recognition;
+    recognition = makeRecognition();
+    listening = false;
+    try { old?.abort(); } catch { /* already stopped */ }
+    logNote(`mic: fresh recognizer (${why})`);
+    if (wantListening && !muted && !speaking && !busy) setTimeout(startListening, RESTART_MS);
+  }
+
+  if (Recognition) recognition = makeRecognition();
+
+  // ---------- watchdog: the mic is on whenever it should be ----------
+  // A swallowed start() error or an "end" event that never comes would leave the mic off with nothing in the log.
+  let offSince = 0;
+  setInterval(() => {
+    if (!started || STT === "transcribe" || !recognition) return;
+    const now = Date.now();
+    const should = wantListening && !muted && !speaking && !busy;
+    if (!should || listening) offSince = 0;
+    else if (!offSince) offSince = now;
+    else if (now - offSince > 1500) {
+      offSince = 0;
+      logNote("mic: was off for no reason, restarting");
+      startListening();
+    }
+    // Chrome ends a silent phrase itself after several seconds; 20 s without any event means it is stuck.
+    if (listening && now - lastRecEventAt > 20000) renewRecognition("no events for 20 s");
+  }, 1000);
+  // Coming back to the tab: make sure the mic is running again.
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState !== "visible" || !started || STT === "transcribe") return;
+    cycleNote("tab visible again");
+    if (!listening) startListening();
+  });
 
   // ---------- listening: Amazon Transcribe streaming (default) ----------
   // One stream stays open while listening. Partials light the ring and mark when speech started; each final
@@ -520,8 +571,9 @@
       logNote(`holding "${alts[0]}" for the rest of the move`);
       return;
     }
-    if (window.AlexaWake.isSleep(alts[0])) return sleepByVoice();
-    if (window.AlexaWake.isOnlyStop(alts[0])) return logNote(`"${alts[0]}": nothing to stop`);
+    if (window.AlexaWake.isSleepCommand(alts)) return sleepByVoice();
+    // ...unless another reading was chess ("pause" | "pawn"): then it goes to her like anything else.
+    if (window.AlexaWake.isOnlyStop(alts[0]) && !window.AlexaWake.soundsLikeChess(alts.slice(1))) return logNote(`"${alts[0]}": nothing to stop`);
     const d = window.AlexaWake.decide(alts, { now, awakeUntil, followUpUntil, speechAt: startedAt, openMic: OPEN_MIC });
     if (d.action === "send") return sendWithChessEars(d, startedAt || now, now);
     if (d.action === "awake") {
@@ -547,15 +599,17 @@
   // ---------- a recognizer language that goes deaf ----------
   // Chrome's en-IN service once returned nothing for hours, with no error: speech detected, zero words. After two
   // such sessions in a row, switch to English (US) so the wake word keeps working.
+  // In en-US too it can go deaf the same way: then a fresh recognizer (returns true) instead of another language.
   let heardSpeech = false, gotWords = false, deafSessions = 0;
   function checkLanguageHealth() {
-    if (speaking || muted) return;
+    if (speaking || muted) return false;
     deafSessions = heardSpeech && !gotWords ? deafSessions + 1 : 0;
-    if (deafSessions >= 2 && langSel.value !== "en-US") {
-      logNote(`${langSel.value} heard speech but returned no words twice: switching to en-US`);
-      langSel.value = "en-US";
-      deafSessions = 0;
-    }
+    if (deafSessions < 2) return false;
+    deafSessions = 0;
+    if (langSel.value === "en-US") return true;
+    logNote(`${langSel.value} heard speech but returned no words twice: switching to en-US`);
+    langSel.value = "en-US";
+    return false;
   }
 
   function startListening() {

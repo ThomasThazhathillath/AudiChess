@@ -120,7 +120,7 @@ describe("conversation metrics", () => {
     expect(m.toolErrors.count).toBe(1);
     expect(m.latencyMs).toMatchObject({ avg: 2000, p50: 2000, max: 3000 });
     expect(m.tokens.inputTokens).toBe(3000);
-    expect(m.costUsd?.total).toBeCloseTo((3000 * 0.3 + 300 * 2.5) / 1e6, 6);
+    expect(m.costUsd?.total).toBeCloseTo((3000 * 0.35 + 300 * 2.95) / 1e6, 4); // billed ap-south-1 prices
     expect(m.ungroundedSquares.list.map((u) => u.squares)).toEqual([["d5"]]);
     expect(m.engineMoveNotSaid.list).toMatchObject([{ turn: 1, engineMove: "e5" }]);
     expect(m.repeatedFirstWords).toEqual([{ word: "you", replies: 2 }]);

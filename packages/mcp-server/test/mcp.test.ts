@@ -106,7 +106,7 @@ describe("playing a game", () => {
     expect((await call("read_board", { gameId: game.gameId })).speech).toContain("It's your move as White.");
     expect((await call("legal_moves", { gameId: game.gameId, piece: "knight" })).moves.length).toBeGreaterThan(0);
     expect((await call("game_status", { gameId: game.gameId })).speech).toMatch(/^Move 2\. It's your move as White\./);
-    expect((await call("hint", { gameId: game.gameId })).speech).toMatch(/^Try /);
+    expect((await call("hint", { gameId: game.gameId })).speech).toMatch(/^The best move here, according to the engine, would be [a-z]/);
 
     const undo = await call("undo", { gameId: game.gameId });
     expect(undo.speech).toContain("Took back pawn to e4");
@@ -173,6 +173,46 @@ describe("conversation features", () => {
     expect(r.needsConfirmation).toBe(true);
     expect(r.speech).toMatch(/Did you mean/);
     expect(store.moves.get(game.gameId) ?? []).toHaveLength(0);
+  }, 30_000);
+
+  it("reports what happened this turn for jabs and compliments", async () => {
+    scriptEngine("e7e5", "b7a6");
+    const game = await call("new_game", { color: "white", level: 2 });
+    const first = await call("make_move", { gameId: game.gameId, move: "e4" });
+    expect(first.moveFacts).toMatchObject({ yourPiece: "pawn", myPiece: "pawn", materialChange: 0, iGaveCheck: false, wasInCheck: false, phase: "opening" });
+    // 2.Ba6?? bxa6: she wins a bishop.
+    const r = await call("make_move", { gameId: game.gameId, move: "Ba6" });
+    expect(r.commentary.yourMove.quality).toMatch(/mistake|blunder/);
+    expect(r.moveFacts).toMatchObject({ yourPiece: "bishop", myPiece: "pawn", iCaptured: "bishop", materialChange: -3, materialBalance: -3 });
+    expect(r.moveFacts.winner).toBeUndefined();
+  }, 30_000);
+
+  it("names the winner when the game ends", async () => {
+    const g = await call("new_game", { color: "white", level: 1, fen: "6k1/5ppp/8/8/8/8/8/R5K1 w - - 0 1" });
+    const r = await call("make_move", { gameId: g.gameId, move: "Ra8" });
+    expect(r.moveFacts).toMatchObject({ youGaveCheck: true, winner: "you" });
+  }, 30_000);
+
+  it("undoes back to a set-up start position", async () => {
+    scriptEngine("g8h8");
+    const fen = "6k1/5ppp/8/8/8/8/8/R5K1 w - - 0 1";
+    const g = await call("new_game", { color: "white", level: 1, fen });
+    await call("make_move", { gameId: g.gameId, move: "Kf2" });
+    const undo = await call("undo", { gameId: g.gameId });
+    expect(undo.isError).toBe(false);
+    expect(undo.fen).toBe(fen);
+  }, 30_000);
+
+  it("keeps move lists short unless the whole game is asked for", async () => {
+    const setup = ["e4", "e5", "Nf3", "Nc6", "Bc4", "Bc5", "c3", "Nf6", "d3", "d6"];
+    const g = await call("new_game", { color: "white", level: 1, setupMoves: setup });
+    const last = await call("last_moves", { gameId: g.gameId, count: 20 });
+    expect(last.moves).toHaveLength(6);
+    const short = await call("game_history", { gameId: g.gameId });
+    expect(short.speech).toMatch(/^10 half-moves so far\. The last ones: 3\. White bishop to c4/);
+    expect(short.speech).not.toMatch(/knight to f3/);
+    const full = await call("game_history", { gameId: g.gameId, full: true });
+    expect(full.speech).toMatch(/^10 half-moves\. 1\. White pawn to e4/);
   }, 30_000);
 
   it("changes difficulty mid-game", async () => {
@@ -247,8 +287,15 @@ describe("questions about the position", () => {
     const g = await call("new_game", { color: "white", level: 1 });
     const one = await call("hint", { gameId: g.gameId });
     expect(one.options).toHaveLength(1);
-    expect(one.speech).toMatch(/^Try /);
-    expect((await call("hint", { gameId: g.gameId, count: 3 })).options).toHaveLength(3);
+    expect(one.speech).toMatch(/^The best move here, according to the engine, would be [a-z]+ to [a-h][1-8]\.$/);
+    const three = await call("hint", { gameId: g.gameId, count: 3 });
+    expect(three.options).toHaveLength(3);
+    expect(three.speech).toMatch(/^According to the engine, the best moves are [^,]+, [^,]+ or [^,]+\.$/);
+    // One piece's best move: the engine searches only that piece's moves.
+    const knight = await call("hint", { gameId: g.gameId, piece: "knight" });
+    expect(knight.speech).toMatch(/^The best knight move here, according to the engine, would be knight to [a-h][1-8]\.$/);
+    const king = await call("hint", { gameId: g.gameId, piece: "king" });
+    expect(king).toMatchObject({ isError: true, speech: "Your king has no legal move right now." });
     const vague = await call("hint", { gameId: g.gameId, reveal: false });
     expect(vague.speech).toMatch(/^Look at your /);
     expect(vague.speech).not.toMatch(/[a-h][1-8]/);

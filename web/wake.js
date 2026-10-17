@@ -119,5 +119,14 @@
   const SLEEP = /^\s*(?:(?:ok(?:ay)?|hey)?[\s,]*alexa[\s,]+)?(?:stop listening|pause listening|pause|mute|mute yourself|go to sleep|sleep|take a break|don'?t listen)[\s.!]*$/i;
   const isSleep = (text) => SLEEP.test(String(text || ""));
 
-  root.AlexaWake = { WAKE, FOLLOW_UP, afterWake, decide, followUpMs, bargeIn, isOnlyStop, endpointMs, incomplete, isSleep };
+  /**
+   * The mic sleeps only when no other reading sounds like chess: "pause" was most likely "pawn" when it came right
+   * after "Did you mean pawn to d4?" (2026-10-17 log), and muting there made her seem deaf.
+   */
+  const CHESS_LIKE = /\b(?:pawn|porn|pond|pawan|knight|night|bishop|rook|ruk|queen|king|castle)\w*|\b[a-h]\s?[1-8]\b/i;
+  /** Any of these readings sounds like chess (a piece or a square): then a lone "pause" / "stop" is not one. */
+  const soundsLikeChess = (alts) => (alts || []).some((a) => CHESS_LIKE.test(String(a || "")));
+  const isSleepCommand = (alts) => isSleep(alts?.[0]) && !soundsLikeChess((alts || []).slice(1));
+
+  root.AlexaWake = { WAKE, FOLLOW_UP, afterWake, decide, followUpMs, bargeIn, isOnlyStop, endpointMs, incomplete, isSleep, isSleepCommand, soundsLikeChess };
 })(typeof window !== "undefined" ? window : globalThis);

@@ -1,10 +1,10 @@
 import { Chess, type Color, type Move, type PieceSymbol, type Square } from "chess.js";
-import { PIECE_NAMES, PIECE_PLURALS, colorName, joinAnd, spokenMove, spokenPieceList, spokenSquare } from "./spoken.js";
+import { PIECE_NAMES, PIECE_PLURALS, colorName, compactPieceList, joinAnd, joinOr, spokenMove, spokenSquare } from "./spoken.js";
 
 export type GameStatus = "active" | "checkmate" | "stalemate" | "draw" | "resigned";
 export type GameResult = "1-0" | "0-1" | "1/2-1/2";
 
-const PIECE_WORDS: Record<string, PieceSymbol> = {
+export const PIECE_WORDS: Record<string, PieceSymbol> = {
   pawn: "p", pawns: "p", knight: "n", knights: "n", night: "n", horse: "n",
   bishop: "b", bishops: "b", rook: "r", rooks: "r", castle: "r",
   queen: "q", queens: "q", king: "k",
@@ -133,18 +133,55 @@ export function piecesOf(chess: Chess, color: Color): { type: PieceSymbol; squar
     .map((p) => ({ type: p.type, square: p.square }));
 }
 
-export function readBoard(chess: Chess, format: "pieces" | "ranks" = "pieces"): string {
+/**
+ * The whole position, short enough to follow by ear: "You have king e1, queen d1, ..., pawns a2 to h2. I have ...".
+ * The start position is 44 words (it was 73). `userColor` turns White/Black into you/I, the user's side first.
+ */
+export function readBoard(chess: Chess, format: "pieces" | "ranks" = "pieces", userColor?: Color): string {
   if (format === "pieces") {
-    return `White has ${spokenPieceList(piecesOf(chess, "w"))}. Black has ${spokenPieceList(piecesOf(chess, "b"))}.`;
+    if (userColor) {
+      const me: Color = userColor === "w" ? "b" : "w";
+      return `You have ${compactPieceList(piecesOf(chess, userColor))}. I have ${compactPieceList(piecesOf(chess, me))}.`;
+    }
+    return `White has ${compactPieceList(piecesOf(chess, "w"))}. Black has ${compactPieceList(piecesOf(chess, "b"))}.`;
   }
+  // Row by row, short: the owner once per run of pieces, pawn ranges, empty ranks merged. "Rank 8: my rook a8, knight
+  // b8, …. Rank 7: my pawns a7 to h7. Ranks 6 to 3: empty. …" The start position is 47 words (it was 153).
+  const owner = (c: Color) => (userColor ? (c === userColor ? "your" : "my") : colorName(c).toLowerCase());
   const lines: string[] = [];
+  let emptyFrom = 0;
   const board = chess.board(); // board[0] is rank 8
+  const flushEmpty = (to: number) => {
+    if (emptyFrom) lines.push(emptyFrom === to ? `Rank ${to}: empty.` : `Ranks ${emptyFrom} to ${to}: empty.`);
+    emptyFrom = 0;
+  };
   board.forEach((row, i) => {
     const rank = 8 - i;
-    const occupied = row
-      .filter((p): p is NonNullable<typeof p> => p !== null)
-      .map((p) => `${colorName(p.color).toLowerCase()} ${PIECE_NAMES[p.type]} on ${spokenSquare(p.square)}`);
-    lines.push(`Rank ${rank}: ${occupied.length ? occupied.join(", ") : "empty"}.`);
+    const pieces = row.filter((p): p is NonNullable<typeof p> => p !== null);
+    if (!pieces.length) {
+      if (!emptyFrom) emptyFrom = rank;
+      if (rank === 1) flushEmpty(1);
+      return;
+    }
+    flushEmpty(rank + 1);
+    const parts: string[] = [];
+    for (let j = 0; j < pieces.length; ) {
+      // A run of one side's pieces in file order; three or more pawns side by side read as a range.
+      let k = j;
+      while (k + 1 < pieces.length && pieces[k + 1].color === pieces[j].color) k++;
+      const run = pieces.slice(j, k + 1);
+      const items: string[] = [];
+      for (let a = 0; a < run.length; ) {
+        let b = a;
+        while (run[a].type === "p" && b + 1 < run.length && run[b + 1].type === "p" && run[b + 1].square.charCodeAt(0) === run[b].square.charCodeAt(0) + 1) b++;
+        items.push(b - a >= 2 ? `pawns ${run[a].square} to ${run[b].square}` : `${PIECE_NAMES[run[a].type]} ${run[a].square}`);
+        if (b - a < 2) b = a;
+        a = b + 1;
+      }
+      parts.push(`${owner(run[0].color)} ${items.join(", ")}`);
+      j = k + 1;
+    }
+    lines.push(`Rank ${rank}: ${parts.join(", ")}.`);
   });
   return lines.join(" ");
 }
@@ -171,11 +208,29 @@ export function legalMovesSpoken(chess: Chess, opts: { square?: string; piece?: 
     subject = count === 1 ? `Your ${PIECE_NAMES[type] ?? opts.piece}` : `Your ${PIECE_PLURALS[type] ?? `${opts.piece}s`}`;
   }
   if (moves.length === 0) return { speech: `${subject} can't move right now.`, moves: [] };
+  const san = moves.map((m) => m.san);
+  // One piece: just its squares, captures first ("Your queen can take on h7, or go to c4, b5, a6 or e4, and 6 more").
+  // A list of eleven queen moves was the longest thing she said in the 2026-10-17 game (47 words).
+  if (new Set(moves.map((m) => m.from)).size === 1) {
+    const castles = moves.filter((m) => m.flags.includes("k") || m.flags.includes("q")).map((m) => (m.flags.includes("k") ? "castle kingside" : "castle queenside"));
+    const takes = [...new Set(moves.filter((m) => m.captured).map((m) => m.to))];
+    const goes = [...new Set(moves.filter((m) => !m.captured && !m.flags.includes("k") && !m.flags.includes("q")).map((m) => m.to))];
+    const total = castles.length + takes.length + goes.length;
+    let room = MAX_LISTED;
+    const pick = <T,>(xs: T[]) => { const shown = xs.slice(0, Math.max(0, room)); room -= shown.length; return shown; };
+    const parts = [pick(castles).join(" or "), takes.length ? `take on ${joinOr(pick(takes))}` : "", goes.length && room > 0 ? `go to ${joinOr(pick(goes))}` : ""].filter(Boolean);
+    const shown = MAX_LISTED - room;
+    const more = total > shown ? `, and ${total - shown} more` : "";
+    return { speech: `${subject} can ${parts.join(", or ")}${more}.`, moves: san };
+  }
   const list = moves.map((m) => spokenMove(m));
-  const shown = list.slice(0, 12);
+  const shown = list.slice(0, MAX_LISTED);
   const more = list.length > shown.length ? `, and ${list.length - shown.length} more` : "";
-  return { speech: `${subject} can play: ${joinAnd(shown)}${more}.`, moves: moves.map((m) => m.san) };
+  return { speech: `${subject} can play: ${joinAnd(shown)}${more}.`, moves: san };
 }
+
+/** Moves read out at most in one list; the rest is "and N more". */
+const MAX_LISTED = 5;
 
 export function material(chess: Chess): { white: number; black: number; speech: string } {
   let white = 0;
