@@ -158,21 +158,18 @@ describe("Phase 4: voice and conversation", () => {
     expect((q.calls[0].messages!.at(-1)!.content![0] as any).text).toBe('what did I play first\n(speech recognition alternatives: "what did I pay first")');
   });
 
-  it("changes chattiness, voice and speed locally without calling the chess server", async () => {
+  it("changes chattiness and voice locally without calling the chess server", async () => {
     const sessions = new MemorySessionStore();
     await gameSession(sessions, "s-pref");
     const { tools, calls } = fakeTools();
-    const spoken: [string, string, number][] = [];
-    const speak = async (text: string, voice: string, rate: number) => { spoken.push([text, voice, rate]); return "QUJD"; };
-    const s = scriptedConverse([use("set_preferences", { chattiness: "minimal", voice: "british", speed: "slower" }), say("Okay, short and British it is.")]);
-    const r = await runTurn({ converse: s.converse, tools, sessions, modelId: "m", speak }, "s-pref", "talk less, use a british voice and slow down");
+    const s = scriptedConverse([use("set_preferences", { chattiness: "minimal", voice: "british" }), say("Okay, short and British it is.")]);
+    const r = await runTurn({ converse: s.converse, tools, sessions, modelId: "m" }, "s-pref", "talk less and use a british voice");
     expect(calls).toHaveLength(0);
     const stored = (await sessions.get("s-pref"))!;
-    expect(stored).toMatchObject({ chattiness: "minimal", voice: "Amy", rate: 85 });
-    expect(r).toMatchObject({ voice: "Amy", audio: "QUJD" });
-    expect(r.reply).toBe("Okay, just the moves from now on, and switching to my British voice, and I'll speak more slowly.");
+    expect(stored).toMatchObject({ chattiness: "minimal", voice: "amy" });
+    expect(r).toMatchObject({ voice: "amy" });
+    expect(r.reply).toBe("Okay, just the moves from now on, and switching to my British voice.");
     expect(s.calls).toHaveLength(1);
-    expect(spoken[0]).toEqual([r.reply, "Amy", 85]);
     // The next turn's system prompt carries the new chattiness.
     const next = scriptedConverse([use("game_status", {}), say("Your move.")]);
     await runTurn({ converse: next.converse, tools, sessions, modelId: "m" }, "s-pref", "whose turn?");

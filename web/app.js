@@ -1,38 +1,24 @@
-// Alexa Chess: a voice-only Echo. Just talk (no wake word) -> agent -> Polly audio back.
+// Alexa Chess: a voice-only Echo. Mic -> Nova 2 Sonic (speech to speech, streamed from this page) -> the chess agent
+// (Sonic's tool) -> Sonic speaks the agent's reply. Chrome's recognizer, the browser voice and Polly were removed on
+// 2026-10-23: they misheard and mispronounced too much.
 (() => {
   "use strict";
 
   const $ = (id) => document.getElementById(id);
   const device = $("device"), live = $("live"), startEl = $("start"), startBtn = $("start-btn"), startNote = $("start-note");
-  const debugEl = $("debug"), debugLog = $("debug-log"), langSel = $("lang");
+  const debugEl = $("debug"), debugLog = $("debug-log");
 
-  const BUILD = "pawn-1"; // shown in the debug drawer, to confirm which code the browser runs
+  const BUILD = "sonic-1"; // shown in the debug drawer, to confirm which code the browser runs
 
   const params = new URLSearchParams(location.search);
-  // Speech-to-text: Chrome's own recognizer (Chrome or Edge), one phrase at a time. It costs nothing on AWS: Amazon
-  // Transcribe was removed on 2026-10-17 because of its cost, and Chrome in English (US) heard chess phrases better
-  // anyway. Chrome decides itself when a phrase is over, so nothing is cut or dropped by our timers.
-  const Recognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-  // Open mic (default): a conversation, no "Alexa" needed; everything heard goes to the agent, which drops only what is
-  // clearly background talk. ?wake=1 restores the wake word with its follow-up windows.
-  const OPEN_MIC = params.get("wake") !== "1";
-  const VERBOSE = params.has("verbose"); // log every mic cycle (one-phrase recognition restarts every few seconds)
-  // ?ondevice=1: recognise on this computer instead of Google's cloud. Only then does Chrome accept word hints (its cloud
-  // refused them with "phrases-not-supported", 2026-10-16), so "pawn" can be boosted: Chrome wrote it as porn, pond,
-  // pwn, phone, font and "on" in the 2026-10-17 game. Experimental in Chrome: anything unsupported falls back to the cloud.
-  const ONDEVICE = params.has("ondevice");
-  const BOOSTS = [["pawn", 5], ["pawns", 3], ["takes", 3], ["knight", 3], ["bishop", 3], ["rook", 3], ["queen", 2], ["king", 2], ["castle", 2], ["kingside", 2], ["queenside", 2], ["undo", 2]];
-  let onDevice = false;
-  // The mic is half-duplex, like a walkie-talkie: closed while she talks; tap the speaker or press Esc to cut her off.
-
-  // Chess ears (Vosk) open the mic a second time. With them running, Chrome's recognizer still saw "speech
-  // detected" but returned almost no words for 40 minutes (2026-10-16 log), so they're off unless ?ears=1.
-  const EARS_ON = params.has("ears");
-
-  // ---------- tunables ----------
-  const WAKE = window.AlexaWake.WAKE; // shared with the tested gate in wake.js
-  const AWAKE_MS = 12000;     // after a bare "Alexa", wait this long for the command (8 s was too short in the live test)
-  // After each reply, wake.js followUpMs() keeps listening without the wake word (long during a game).
+  const LOCAL = /^(localhost|127\.0\.0\.1|\[::1\])$/.test(location.hostname);
+  // The mic is half-duplex by default, like a walkie-talkie: while she talks Sonic gets silence, so she can't hear
+  // herself through the speakers; tap the speaker or press Esc to cut her off. ?bargein=1 streams the mic throughout
+  // (with headphones), and Sonic's own barge-in stops her when you talk over her.
+  const BARGE_IN = params.get("bargein") === "1";
+  const SESSION_RENEW_MS = 7 * 60 * 1000; // Sonic streams last 8 minutes at most: a fresh one opens between turns
+  const IDLE_PAUSE_MS = 5 * 60 * 1000;     // nobody spoke for 5 minutes: stop streaming (Sonic bills the open mic)
+  const FRAME = 512;                        // 32 ms of 16 kHz audio per frame, what Sonic expects
 
   // ---------- storage (may be unavailable) ----------
   const store = {
@@ -44,104 +30,76 @@
   store.set("alexaChess.session", sessionId);
 
   // ---------- state ----------
-  let agentUrl = null;
+  let config = null;
   let started = false;
   let muted = false;
-  let busy = false;          // waiting for the agent
-  let speaking = false;
-  let awakeUntil = 0;
-  let followUpUntil = 0;
-  let currentAudio = null;
-  let stateTimer = null;
+  let busy = false;        // the agent is working on a reply
+  let voiceId = store.get("alexaChess.voice", "kiara");
 
   function setState(s, announce) {
     device.dataset.state = s;
     if (announce) live.textContent = announce;
   }
-
-  /** The ring's resting state: red if muted, faint blue while listening without the wake word, else dark. */
-  function restState() {
-    clearTimeout(stateTimer);
-    if (muted) return setState("muted");
-    const now = Date.now();
-    if (OPEN_MIC && awakeUntil <= now) return setState("followup");
-    const until = Math.max(awakeUntil, followUpUntil);
-    if (until > now) {
-      setState(awakeUntil > now ? "awake" : "followup");
-      stateTimer = setTimeout(restState, until - now + 50);
-    } else setState("idle");
-  }
+  const restState = () => setState(muted ? "muted" : "followup");
 
   // ---------- earcons (WebAudio, no files) ----------
-  let audioCtx = null;
+  let outCtx = null; // 24 kHz: Sonic's voice and the earcons
   function tone(freqs, dur = 0.12, gain = 0.06) {
-    if (!audioCtx) return;
-    let t = audioCtx.currentTime;
+    if (!outCtx) return;
+    let t = outCtx.currentTime;
     for (const f of freqs) {
-      const o = audioCtx.createOscillator(), g = audioCtx.createGain();
+      const o = outCtx.createOscillator(), g = outCtx.createGain();
       o.type = "sine"; o.frequency.value = f;
       g.gain.setValueAtTime(0, t);
       g.gain.linearRampToValueAtTime(gain, t + 0.02);
       g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
-      o.connect(g).connect(audioCtx.destination);
+      o.connect(g).connect(outCtx.destination);
       o.start(t); o.stop(t + dur + 0.02);
       t += dur * 0.8;
     }
   }
   const earcon = {
     wake: () => tone([660, 880], 0.1),
-    end: () => tone([740, 520], 0.09, 0.04),
+    sleep: () => tone([880, 520], 0.12, 0.05),
     error: () => tone([300, 220], 0.16, 0.05),
   };
 
   // ---------- debug drawer (press D) ----------
-  function logTurn(heard, alts, data, ms) {
+  const esc = (s) => String(s).replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" })[c]);
+  function logTurn(heard, data, ms) {
     const li = document.createElement("li");
-    const esc = (s) => String(s).replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" })[c]);
     const tools = (data.toolCalls || []).map((t) => `${t.name}(${JSON.stringify(t.args || {})})${t.isError ? " ✗" : ""}`).join(" · ");
     li.innerHTML =
       `<div class="you">🧑 ${esc(heard)}</div>` +
-      (alts.length > 1 ? `<div class="alts">alts: ${esc(alts.slice(1).join(" | "))}</div>` : "") +
       (tools ? `<div class="tools">🔧 ${esc(tools)}</div>` : "") +
       `<div>🔵 ${esc(data.reply || "")}</div>` +
-      `<div class="meta">${(ms / 1000).toFixed(1)} s${timing(data)} · ${data.voice || "browser voice"}${data.usage ? ` · ${data.usage.rounds} rounds · ${data.usage.inputTokens}+${data.usage.outputTokens} tok` : ""}</div>`;
+      `<div class="meta">${(ms / 1000).toFixed(1)} s${timing(data)} · ${data.voice || voiceId}${data.usage ? ` · ${data.usage.rounds} rounds · ${data.usage.inputTokens}+${data.usage.outputTokens} tok` : ""}</div>`;
     debugLog.prepend(li);
-    persistLog(`${new Date().toLocaleTimeString()} · 🧑 ${heard}${alts.length > 1 ? ` [alts: ${alts.slice(1).join(" | ")}]` : ""}${tools ? ` 🔧 ${tools}` : ""} 🔵 ${data.reply || ""} ⏱ ${(ms / 1000).toFixed(1)} s${timing(data)}`);
+    persistLog(`${new Date().toLocaleTimeString()} · 🧑 ${heard}${tools ? ` 🔧 ${tools}` : ""} 🔵 ${data.reply || ""} ⏱ ${(ms / 1000).toFixed(1)} s${timing(data)}`);
     DS?.event(data.error ? "error" : "reply", data.reply || "", `${(ms / 1000).toFixed(1)} s${timing(data)}${tools ? ` · ${tools}` : ""}`);
   }
 
-  /** " (model 0.9 s, board 0.6 s, voice 0.3 s)": where the reply time went, from the agent. */
+  /** " (model 0.9 s, board 0.6 s)": where the agent's time went. */
   function timing(data) {
     const t = data.timings;
     if (!t) return "";
     const s = (x) => `${(x / 1000).toFixed(1)} s`;
-    return ` (${t.fastPath ? "fast · " : ""}model ${s(t.modelMs)}, board ${s(t.toolMs)}, voice ${s(t.ttsMs)})`;
+    return ` (${t.fastPath ? "fast · " : ""}model ${s(t.modelMs)}, board ${s(t.toolMs)})`;
   }
 
-  /** A plain note in the drawer: build tag, ignored speech, mic restarts. Also shown on the debug screen. */
-  function logNote(text) {
+  /** A plain note in the drawer (and on the local debug screen). */
+  function logNote(text, kind = "info") {
     const li = document.createElement("li");
     li.className = "note";
     li.textContent = `${new Date().toLocaleTimeString()} · ${text}`;
     debugLog.prepend(li);
     persistLog(li.textContent);
-    toScreen(text);
+    DS?.event(kind, text);
   }
 
-  // ---------- always-visible debug screen (until the app is tuned; ?debug=0 hides it) ----------
-  const DS = params.get("debug") === "0" ? null : window.DebugScreen;
-  DS?.init({ state: () => ({ speaking, busy, muted, awakeUntil, followUpUntil, openMic: OPEN_MIC, halfDuplex: true }) });
-  /** Route a drawer note to the debug screen: what was heard and what happened to it. */
-  function toScreen(text) {
-    if (!DS) return;
-    const quoted = (t) => /"([^"]*)"/.exec(t)?.[1] ?? t;
-    if (/^hearing "/.test(text)) return; // the live box shows these
-    if (/^heard "/.test(text)) return DS.event("heard", quoted(text), text.replace(/^heard "[^"]*"\s*/, ""));
-    if (/^ignored "/.test(text)) return DS.event("ignored", quoted(text), text.replace(/^ignored "[^"]*"\s*/, ""));
-    if (/^dropped "/.test(text)) return DS.event("dropped", quoted(text), text.replace(/^dropped "[^"]*"\s*/, ""));
-    if (/^interrupted by|^cancelled/.test(text)) return DS.event("interrupt", text);
-    if (/^build |^listening without/.test(text)) return DS.event("info", text);
-  }
+  // ---------- debug screen: local testing only (?debug=1 shows it anywhere), never on the live site by default ----------
+  const DS = (LOCAL && params.get("debug") !== "0") || params.get("debug") === "1" ? window.DebugScreen : null;
+  DS?.init({ state: () => ({ speaking: isSpeaking(), busy, muted, awakeUntil: 0, followUpUntil: 0, openMic: true, halfDuplex: !BARGE_IN }) });
 
   // The drawer's log survives reloads (last 500 lines), so a whole game can be reviewed afterwards.
   const LOG_KEY = "alexaChess.debugLog";
@@ -154,9 +112,8 @@
     mirrorLog(line);
   }
 
-  // Local dev only: mirror the drawer to the local agent (packages/agent/eval-results/live/<date>-drawer.log), so a
-  // real-mic session can be reviewed without access to this browser. Never on the deployed site.
-  const isLocalAgent = () => !!agentUrl && /^http:\/\/(127\.0\.0\.1|localhost)[:/]/.test(agentUrl);
+  // Local dev only: mirror the drawer to the local agent (packages/agent/eval-results/live/<date>-drawer.log).
+  const isLocalAgent = () => !!config?.agentUrl && /^http:\/\/(127\.0\.0\.1|localhost)[:/]/.test(config.agentUrl);
   let mirrorQueue = [], mirrorTimer = null;
   function mirrorLog(line) {
     if (!isLocalAgent()) return;
@@ -165,7 +122,7 @@
       const lines = mirrorQueue;
       mirrorQueue = [];
       mirrorTimer = null;
-      fetch(new URL("debug-log", agentUrl), { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ lines }), keepalive: true }).catch(() => {});
+      fetch(new URL("debug-log", config.agentUrl), { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ lines }), keepalive: true }).catch(() => {});
     }, 1000);
   }
   for (const line of savedLog.slice(-200)) {
@@ -180,455 +137,318 @@
   copyBtn.addEventListener("click", () => navigator.clipboard?.writeText(savedLog.join("\n")).then(() => logNote("log copied to clipboard"), () => logNote("could not copy the log")));
   document.querySelector("#debug header")?.insertBefore(copyBtn, $("new-session"));
 
-  window.addEventListener("chess-ears-log", (e) => logNote(e.detail));
-
-  // ---------- talking to the agent ----------
-  let pending = null; // AbortController of the request in flight ("stop" while thinking cancels it)
-  /**
-   * @param woken false = conversation mode (no "Alexa"): the agent may decide it was background talk and stay
-   *   silent, so there is no chime and the listening window is kept as it was.
-   */
-  async function send(text, alternatives, chessHeard, woken = true) {
-    text = text.trim();
-    if (!text || busy) return;
-    if (!agentUrl) return;
+  // ---------- the agent (Sonic's "alexa" tool) ----------
+  /** One turn through the agent. Returns the words Sonic should say ("" = stay silent). */
+  async function askAgent(text, alternatives) {
     busy = true;
-    clearTimeout(stateTimer); // a pending "awake" timeout must not darken the ring mid-reply
-    const windowsBefore = { awakeUntil, followUpUntil };
-    awakeUntil = 0;
-    followUpUntil = 0;
-    if (woken) earcon.end();
-    DS?.event("sent", text, woken ? "to Alexa (wake word)" : "to Alexa (conversation mode, no wake word)");
     setState("thinking", "Thinking");
     const t0 = performance.now();
-    pending = new AbortController();
     let data;
     try {
-      const res = await fetch(agentUrl, {
+      const res = await fetch(config.agentUrl, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ sessionId, text, alternatives, woken, ...(chessHeard ? { chessHeard } : {}) }),
-        signal: pending.signal,
+        // woken: false = an open-mic conversation, so the agent drops what is clearly background talk.
+        body: JSON.stringify({ sessionId, text, alternatives, woken: false }),
       });
       data = await res.json().catch(() => ({}));
       if (!res.ok || (!data.reply && !data.ignored)) throw new Error(data.error || `HTTP ${res.status}`);
     } catch (err) {
-      if (err.name === "AbortError") data = { ignored: true, cancelled: true };
-      else {
-        data = { reply: "Sorry, I couldn't reach the chess board. Please try again.", error: true };
-        earcon.error();
-      }
+      data = { reply: "Sorry, I couldn't reach the chess board. Please try again.", error: true };
+      earcon.error();
+      logNote(`agent error: ${err.message || err}`, "error");
     }
-    pending = null;
     busy = false;
     if (data.ignored) {
-      // Background talk (or "stop" while thinking): say nothing, keep listening exactly as before.
-      awakeUntil = windowsBefore.awakeUntil;
-      followUpUntil = windowsBefore.followUpUntil;
-      logNote(data.cancelled ? `cancelled "${text}"` : `ignored "${text}" (not for Alexa)${data.timings ? ` · ${data.timings.totalMs} ms` : ""}`);
+      logNote(`ignored "${text}" (not for Alexa)${data.timings ? ` · ${data.timings.totalMs} ms` : ""}`, "ignored");
       restState();
-      resumeListening();
-      return;
+      return "";
     }
-    logTurn(text, alternatives, data, performance.now() - t0);
-    await speak(data);
-    const windowMs = window.AlexaWake.followUpMs(data);
-    followUpUntil = Date.now() + windowMs;
-    if (!OPEN_MIC) logNote(`listening without "Alexa" for ${windowMs / 1000} s`);
-    restState();
+    logTurn(text, data, performance.now() - t0);
+    if (data.voice && data.voice !== voiceId) {
+      voiceId = data.voice;
+      store.set("alexaChess.voice", voiceId);
+      renewAfterTurn = "new voice"; // Sonic sets the voice per stream: the next one uses it
+    }
+    return data.reply;
   }
 
-  // ---------- speaking (Polly MP3 from the agent, browser voice as fallback) ----------
-  function speak(data) {
-    return new Promise((resolve) => {
-      speaking = true;
-      pauseListening(); // never hear herself
-      setState(data.error ? "error" : "speaking");
-      let safety = null;
-      const done = () => {
-        if (!speaking) return;
-        clearTimeout(safety);
-        speaking = false;
-        currentAudio = null;
-        resumeListening();
-        resolve();
-      };
-      // An "ended" event that never comes (browser voices sometimes drop it) must not leave the mic shut for good:
-      // once nothing is playing any more, she's done.
-      const stillTalking = () => (currentAudio ? !currentAudio.paused && !currentAudio.ended : "speechSynthesis" in window && speechSynthesis.speaking);
-      const check = () => { if (stillTalking()) safety = setTimeout(check, 1000); else done(); };
-      safety = setTimeout(check, 3000 + (data.reply || "").length * 80);
-      if (data.audio) {
-        const audio = new Audio(`data:audio/mpeg;base64,${data.audio}`);
-        currentAudio = audio;
-        // Once only: onerror and a rejected play() can both fire, and a second voice would cancel the first (ending it early).
-        const fallback = () => { if (currentAudio !== audio) return; currentAudio = null; browserSpeak(data.reply, done); };
-        audio.onended = done;
-        audio.onerror = fallback;
-        audio.play().catch(fallback);
-      } else browserSpeak(data.reply, done);
-    });
-  }
+  // ---------- Sonic's voice: 24 kHz PCM chunks, played back to back ----------
+  let playHead = 0;          // outCtx time the queued audio ends
+  let sources = [];
+  let dropAudio = false;     // the agent said nothing: anything Sonic says anyway is not played
+  const isSpeaking = () => !!outCtx && outCtx.currentTime < playHead;
 
-  function browserSpeak(text, done) {
-    if (!("speechSynthesis" in window)) return done();
-    const u = new SpeechSynthesisUtterance(text);
-    const lang = langSel.value;
-    const voice = speechSynthesis.getVoices().find((v) => v.lang === lang) || speechSynthesis.getVoices().find((v) => v.lang.startsWith("en"));
-    if (voice) u.voice = voice;
-    u.onend = done;
-    u.onerror = done;
-    speechSynthesis.cancel();
-    speechSynthesis.speak(u);
+  function playChunk(b64) {
+    if (!outCtx || dropAudio || muted) return;
+    const bin = atob(b64);
+    const n = bin.length >> 1;
+    const buf = outCtx.createBuffer(1, n, 24000);
+    const ch = buf.getChannelData(0);
+    for (let i = 0; i < n; i++) {
+      const v = bin.charCodeAt(2 * i) | (bin.charCodeAt(2 * i + 1) << 8);
+      ch[i] = (v >= 0x8000 ? v - 0x10000 : v) / 0x8000;
+    }
+    const src = outCtx.createBufferSource();
+    src.buffer = buf;
+    src.connect(outCtx.destination);
+    const at = Math.max(outCtx.currentTime + 0.03, playHead);
+    src.start(at);
+    playHead = at + buf.duration;
+    sources.push(src);
+    src.onended = () => { sources = sources.filter((s) => s !== src); if (!isSpeaking()) speechDone(); };
+    setState("speaking");
   }
 
   function stopSpeaking() {
-    if (currentAudio) { currentAudio.pause(); currentAudio.onended?.(); }
-    if ("speechSynthesis" in window) speechSynthesis.cancel();
+    for (const s of sources) { try { s.stop(); } catch { /* already done */ } }
+    sources = [];
+    if (outCtx) playHead = outCtx.currentTime;
+    speechDone();
+  }
+  function speechDone() {
+    if (muted) return;
+    if (device.dataset.state === "speaking") restState();
+    maybeRenew();
   }
 
-  // ---------- listening: Chrome's recognizer, one phrase at a time ----------
-  // Like a walkie-talkie conversation: Chrome listens for one phrase, decides itself when it is over and returns it;
-  // we send it, she answers, and the mic opens again as soon as she stops talking. Never while she talks or thinks,
-  // so she can't hear herself. Silence just restarts the mic.
-  let recognition = null;
-  let listening = false;
-  let wantListening = false;
-  const RESTART_MS = 100;    // after a phrase or a silence (was 250: words said in the gap were lost)
-  let restartDelay = RESTART_MS;
-  let speechAt = 0;          // first interim result of the utterance in progress
-  let lastRecEventAt = 0;    // any event from the recognizer, for the watchdog
-  let renewWhy = "";         // a real error: the next "end" builds a fresh recognizer
-  let unfinished = "";       // the latest interim words of the phrase in progress (no final result yet)
-  // Every mic cycle (on, sound, speech, no-speech): on screen only with ?verbose, but always in the local mirror log,
-  // so a deaf spell can be read afterwards (2026-10-17's couldn't: Chrome heard nothing, or sound but no speech?).
-  const cycleNote = (text) => { if (VERBOSE) logNote(text); else mirrorLog(`${new Date().toLocaleTimeString()} · ${text}`); };
-
-  /**
-   * A recognizer with all its handlers. Rebuilt when Chrome's goes deaf (speech detected but no words, twice), after a
-   * real error, or when it stops sending events: the old object is dropped, and its late events are ignored.
-   */
-  function makeRecognition() {
-    const r = new Recognition();
-    r.continuous = false;
-    r.interimResults = true; // live captions and the start time only; just the final phrase is sent
-    r.maxAlternatives = 5;   // n-best readings for the spoken-move matcher
-    // Word hints only on-device: the cloud recognizer fails every start with "phrases-not-supported".
-    if (onDevice) {
-      r.processLocally = true;
-      if (window.SpeechRecognitionPhrase && "phrases" in r) r.phrases = BOOSTS.map(([p, b]) => new window.SpeechRecognitionPhrase(p, b));
+  // ---------- guest credentials for Sonic (Cognito identity pool, guest access) ----------
+  // The classic flow: Cognito's OpenID token, then STS AssumeRoleWithWebIdentity on the stack's guest role. The enhanced
+  // flow (GetCredentialsForIdentity) adds a session policy that never allows Bedrock ("no session policy allows").
+  let creds = null;
+  async function cognito(target, body) {
+    const res = await fetch(`https://cognito-identity.${config.sonic.poolRegion}.amazonaws.com/`, {
+      method: "POST",
+      headers: { "content-type": "application/x-amz-json-1.1", "x-amz-target": `AWSCognitoIdentityService.${target}` },
+      body: JSON.stringify(body),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(`${target}: ${data.message || data.__type || res.status}`);
+    return data;
+  }
+  async function credentials() {
+    if (creds && creds.expiration.getTime() - Date.now() > 5 * 60 * 1000) return creds;
+    let identityId = store.get("alexaChess.identity", null);
+    if (!identityId) {
+      identityId = (await cognito("GetId", { IdentityPoolId: config.sonic.identityPoolId })).IdentityId;
+      store.set("alexaChess.identity", identityId);
     }
-    const on = (fn) => (e) => { if (r !== recognition) return; lastRecEventAt = Date.now(); fn(e); };
-
-    r.onstart = on(() => { listening = true; restartDelay = RESTART_MS; speechAt = 0; heardSpeech = false; gotWords = false; unfinished = ""; cycleNote("mic on"); });
-    r.onend = on(() => {
-      listening = false;
-      // Chrome showed words but ended without a final result ("hearing "undo"…", then nothing, 2026-10-17 game):
-      // the last words it showed are the phrase.
-      if (unfinished && !speaking && !busy && !muted) {
-        const text = unfinished;
-        unfinished = "";
-        logNote(`heard "${text}" (Chrome never finished it)`);
-        handleUtterance([text], speechAt);
-        speechAt = 0;
-      }
-      if (renewWhy) { const why = renewWhy; renewWhy = ""; return renewRecognition(why); }
-      if (checkLanguageHealth()) return renewRecognition("speech detected twice but no words");
-      cycleNote(`mic off${speaking ? " (Alexa speaking)" : busy ? " (thinking)" : muted ? " (muted)" : ", restarting"}`);
-      // After each phrase, a silence or a network hiccup: open the mic again unless she's busy (send() reopens it).
-      if (wantListening && !muted && !speaking && !busy) setTimeout(startListening, restartDelay);
-    });
-    // Diagnostics: how far Chrome gets each cycle (audio captured -> sound -> speech -> result).
-    r.onaudiostart = on(() => cycleNote("audio capture started"));
-    r.onsoundstart = on(() => cycleNote("sound detected"));
-    r.onspeechstart = on(() => { heardSpeech = true; cycleNote("speech detected"); });
-    r.onaudioend = on(() => cycleNote("audio capture ended"));
-    r.onnomatch = on(() => logNote("speech heard but not recognised"));
-    r.onerror = on((e) => {
-      if (e.error === "no-speech" || e.error === "aborted") return cycleNote(`recognition: ${e.error}`); // silence, or we stopped it
-      logNote(`recognition error: ${e.error}${e.message ? ` (${e.message})` : ""}`);
-      if (e.error === "not-allowed" || e.error === "service-not-allowed") {
-        // Not only "blocked": it came after 7 quiet minutes on 2026-10-17 and switched the mic off for good. Muted
-        // instead, so a tap (a user gesture Chrome accepts) turns it back on.
-        if (!muted) toggleMute();
-        setState("muted", "Microphone off. Tap the speaker to turn it back on.");
-        return;
-      }
-      if (onDevice && /not-supported|language|phrases/.test(e.error)) {
-        onDevice = false; // the fresh recognizer below is the normal cloud one
-        logNote(`on-device speech failed (${e.error}): back to Chrome's cloud recognizer`);
-      }
-      restartDelay = Math.min(restartDelay * 2, 5000);
-      renewWhy = `after "${e.error}"`;
-    });
-    r.onresult = on((e) => {
-      lastChromeAt = Date.now();
-      gotWords = true;
-      if (speaking || busy || muted) { // half-duplex: never react to our own voice
-        const last = e.results[e.results.length - 1];
-        if (last?.isFinal) logNote(`dropped "${last[0].transcript.trim()}" (${speaking ? "Alexa was speaking" : busy ? "still thinking" : "muted"})`);
-        speechAt = 0;
-        return;
-      }
-      for (let i = e.resultIndex; i < e.results.length; i++) {
-        const result = e.results[i];
-        const top = result[0].transcript;
-        if (!result.isFinal) {
-          unfinished = top.trim();
-          DS?.hearing(top.trim());
-          if (!speechAt) { speechAt = Date.now(); logNote(`hearing "${top.trim()}"…`); } // counts even if Chrome finalises later
-          // Still talking: a held "bishop…" waits for the rest ("f4" was being said when the hold ran out, 2026-10-17).
-          if (held) { clearTimeout(held.timer); held.timer = setTimeout(flushHeld, HOLD_MS); }
-          // Light the ring the moment the wake word is heard, like a real Echo.
-          if (WAKE.test(top) && device.dataset.state === "idle") { earcon.wake(); setState("awake", "Listening"); }
-          // No forced early finals: ending an utterance after a 1.3 s pause (and restarting the mic) cut
-          // "Alexa … let's play chess" in two and lost the command (2026-10-16 log). Chrome finalises itself.
-          continue;
-        }
-        unfinished = "";
-        const alts = Array.from({ length: result.length }, (_, j) => result[j].transcript.trim()).filter(Boolean);
-        if (alts.length) logNote(`heard "${alts[0]}"${alts.length > 1 ? ` (alternatives: ${alts.slice(1).join(" | ")})` : ""}`);
-        handleUtterance(alts, speechAt);
-        speechAt = 0;
-      }
-    });
-    return r;
-  }
-
-  /** Swap in a fresh recognizer (the old one is aborted and its late events ignored), then listen again. */
-  function renewRecognition(why) {
-    if (!Recognition) return;
-    const old = recognition;
-    recognition = makeRecognition();
-    listening = false;
-    try { old?.abort(); } catch { /* already stopped */ }
-    logNote(`mic: fresh recognizer (${why})`);
-    if (wantListening && !muted && !speaking && !busy) setTimeout(startListening, RESTART_MS);
-  }
-
-  if (Recognition) recognition = makeRecognition();
-
-  /** ?ondevice=1, on the Start tap (installing a model needs a user gesture): the local model, downloaded if needed. */
-  async function prepareOnDevice() {
-    if (!ONDEVICE || !Recognition) return;
-    const lang = langSel.value;
+    let token;
     try {
-      if (typeof Recognition.available !== "function") throw new Error("this browser has no on-device recognition");
-      let state = await Recognition.available({ langs: [lang], processLocally: true });
-      if (state === "downloadable" || state === "downloading") {
-        logNote(`on-device speech: downloading the ${lang} model…`);
-        state = (await Recognition.install({ langs: [lang], processLocally: true })) ? "available" : "unavailable";
-      }
-      if (state !== "available") throw new Error(`the ${lang} model is ${state}`);
-      onDevice = true;
-      recognition = makeRecognition();
-      logNote(`on-device speech on (${lang}), ${window.SpeechRecognitionPhrase ? "\"pawn\" boosted" : "but this browser takes no word boosts"}`);
+      token = (await cognito("GetOpenIdToken", { IdentityId: identityId })).Token;
     } catch (err) {
-      logNote(`on-device speech off: ${err.message || err}; using Chrome's cloud recognizer`);
+      store.set("alexaChess.identity", ""); // an identity from an old pool: a new one next time
+      throw err;
     }
+    const q = new URLSearchParams({ Action: "AssumeRoleWithWebIdentity", Version: "2011-06-15", RoleSessionName: "alexa-chess-guest", RoleArn: config.sonic.roleArn, WebIdentityToken: token, DurationSeconds: "3600" });
+    const xml = await (await fetch(`https://sts.amazonaws.com/?${q}`)).text();
+    const tag = (n) => new RegExp(`<${n}>([^<]*)</${n}>`).exec(xml)?.[1];
+    if (!tag("AccessKeyId")) throw new Error(`STS: ${tag("Message") || "no credentials"}`);
+    creds = { accessKeyId: tag("AccessKeyId"), secretAccessKey: tag("SecretAccessKey"), sessionToken: tag("SessionToken"), expiration: new Date(tag("Expiration")) };
+    return creds;
   }
 
-  // ---------- watchdog: the mic is on whenever it should be ----------
-  // A swallowed start() error or an "end" event that never comes would leave the mic off with nothing in the log.
-  let offSince = 0;
+  // ---------- the Sonic stream ----------
+  let sonic = null;          // the open stream (AlexaSonic.open)
+  let sonicClient = null;
+  let openedAt = 0;
+  let lastUserAt = 0;        // last time Sonic heard the user
+  let renewAfterTurn = "";   // a reason to open a fresh stream once she has finished talking
+  let retryMs = 1000;
+  let usage = { speechIn: 0, speechOut: 0, textIn: 0, textOut: 0 };
+  let usageBase = { speechIn: 0, speechOut: 0, textIn: 0, textOut: 0 }; // totals of the streams already closed
+
+  function openSonic(why) {
+    if (!config?.sonic || muted) return;
+    const B = window.BedrockSonic;
+    if (!B) { setState("error", "Couldn't load the voice. Reload the page."); return; }
+    sonicClient ??= new B.BedrockRuntimeClient({ region: config.sonic.region, credentials });
+    const s = window.AlexaSonic.open({
+      send: (input) => sonicClient.send(new B.InvokeModelWithBidirectionalStreamCommand(input)),
+      modelId: config.sonic.modelId,
+      voiceId,
+      onUserText: (text) => {
+        const t = window.AlexaSonic.clean(text);
+        if (!t) return;
+        lastUserAt = Date.now();
+        dropAudio = false;
+        heardLog.push(t);
+        DS?.hearing(t);
+        logNote(`heard "${t}"`, "heard");
+      },
+      onToolUse: async ({ heard }) => {
+        const said = window.AlexaSonic.clean(lastHeard() || heard);
+        const other = window.AlexaSonic.clean(heard);
+        if (window.AlexaWake.isSleepCommand([said])) { dropAudio = true; setTimeout(sleepByVoice, 0); return ""; }
+        if (window.AlexaWake.isOnlyStop(said)) { dropAudio = true; logNote(`"${said}": nothing to stop`); return ""; }
+        const say = await askAgent(said, other && other !== said ? [said, other] : [said]);
+        if (!say) dropAudio = true;
+        return say;
+      },
+      onRepeatTool: (heard) => logNote(`Sonic asked again for "${heard}": not sent`),
+      onAudio: playChunk,
+      onInterrupted: () => { logNote("interrupted: she stopped talking", "interrupt"); stopSpeaking(); },
+      onTurnEnd: () => maybeRenew(),
+      onUsage: (u) => {
+        const t = u.details?.total;
+        if (!t) return;
+        usage = { speechIn: usageBase.speechIn + t.input.speechTokens, speechOut: usageBase.speechOut + t.output.speechTokens, textIn: usageBase.textIn + t.input.textTokens, textOut: usageBase.textOut + t.output.textTokens };
+      },
+      onClose: (err) => {
+        if (sonic !== s) return; // a stream we replaced on purpose
+        sonic = null;
+        usageBase = { ...usage };
+        if (muted) return;
+        if (err) {
+          logNote(`voice stream closed: ${err.message || err}; reconnecting in ${retryMs / 1000} s`, "error");
+          setState("error");
+          setTimeout(() => { restState(); openSonic("reconnect"); }, retryMs);
+          retryMs = Math.min(retryMs * 2, 30000);
+        } else openSonic("stream ended");
+      },
+    });
+    heardLog = [];
+    sonic = s;
+    openedAt = Date.now();
+    lastUserAt ||= Date.now();
+    renewAfterTurn = "";
+    logNote(`voice: Nova 2 Sonic stream open (${voiceId}, ${why})`);
+    setTimeout(() => { if (sonic === s) retryMs = 1000; }, 10000);
+  }
+  // Sonic's transcripts: the last one is what the agent gets (the tool argument is Sonic's own copy of it).
+  let heardLog = [];
+  const lastHeard = () => heardLog.at(-1) || "";
+
+  function closeSonic() {
+    const s = sonic;
+    sonic = null;
+    usageBase = { ...usage };
+    s?.close();
+  }
+
+  /** Between turns: a fresh stream before Sonic's 8-minute limit, or for a new voice. */
+  function maybeRenew() {
+    if (!sonic || busy || isSpeaking() || muted) return;
+    const why = renewAfterTurn || (Date.now() - openedAt > SESSION_RENEW_MS ? "renewed before the 8-minute limit" : "");
+    if (!why) return;
+    const old = sonic;
+    sonic = null;
+    usageBase = { ...usage };
+    old.close();
+    openSonic(why);
+  }
+
+  // ---------- the microphone: 16 kHz PCM frames to Sonic ----------
+  const WORKLET = `class Mic extends AudioWorkletProcessor {
+    constructor() { super(); this.buf = new Int16Array(${FRAME}); this.n = 0; }
+    process(inputs) {
+      const ch = inputs[0] && inputs[0][0];
+      if (ch) for (let i = 0; i < ch.length; i++) {
+        const v = Math.max(-1, Math.min(1, ch[i]));
+        this.buf[this.n++] = v < 0 ? v * 0x8000 : v * 0x7fff;
+        if (this.n === ${FRAME}) { this.port.postMessage(this.buf); this.buf = new Int16Array(${FRAME}); this.n = 0; }
+      }
+      return true;
+    }
+  }
+  registerProcessor("mic", Mic);`;
+  const silence = new Int16Array(FRAME);
+  let quietUntil = 0; // half-duplex: silence until a moment after she stops (the room's echo)
+
+  async function startMic() {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true } });
+    const ctx = new AudioContext({ sampleRate: 16000 });
+    await ctx.audioWorklet.addModule(URL.createObjectURL(new Blob([WORKLET], { type: "text/javascript" })));
+    const node = new AudioWorkletNode(ctx, "mic");
+    ctx.createMediaStreamSource(stream).connect(node);
+    node.port.onmessage = (e) => {
+      if (!sonic || muted) return;
+      const speaking = isSpeaking();
+      if (speaking) quietUntil = Date.now() + 400;
+      const frame = !BARGE_IN && (speaking || Date.now() < quietUntil) ? silence : e.data;
+      sonic.audio(frame);
+      if (DS) { let sum = 0; for (let i = 0; i < e.data.length; i += 8) sum += (e.data[i] / 0x8000) ** 2; DS.level(Math.sqrt(sum / (e.data.length / 8))); }
+    };
+  }
+
+  // Nobody spoke for 5 minutes: close the stream (an open mic costs money on Sonic), tap to come back.
   setInterval(() => {
-    if (!started || !recognition) return;
-    const now = Date.now();
-    const should = wantListening && !muted && !speaking && !busy;
-    if (!should || listening) offSince = 0;
-    else if (!offSince) offSince = now;
-    else if (now - offSince > 1500) {
-      offSince = 0;
-      logNote("mic: was off for no reason, restarting");
-      startListening();
+    if (!started || muted || !sonic || busy || isSpeaking()) return;
+    if (Date.now() - lastUserAt > IDLE_PAUSE_MS) {
+      logNote("nobody spoke for 5 minutes: paused listening (tap the speaker to talk again)");
+      toggleMute();
+      setState("muted", "Paused. Tap the speaker to talk again.");
     }
-    // Chrome ends a silent phrase itself after several seconds; 20 s without any event means it is stuck.
-    if (listening && now - lastRecEventAt > 20000) renewRecognition("no events for 20 s");
-  }, 1000);
-  // Coming back to the tab: make sure the mic is running again.
-  document.addEventListener("visibilitychange", () => {
-    if (document.visibilityState !== "visible" || !started) return;
-    cycleNote("tab visible again");
-    if (!listening) startListening();
-  });
-
-  // ---------- chess ears fallback ----------
-  // Chrome's recognizer sometimes detects speech but returns no words for minutes, with no error. Vosk still
-  // hears chess words and "alexa", so when Chrome stays silent about an utterance, Vosk's reading is used alone.
-  let lastChromeAt = 0;     // last time Chrome returned any result
-  let voskSentUntil = 0;    // end of the last utterance sent from Vosk alone: Chrome's late copy is ignored
-  const CHROME_GRACE_MS = 2000;
-  window.addEventListener("chess-ears-final", (e) => {
-    const h = e.detail;
-    setTimeout(() => {
-      const text = String(h.text).replace(/\[unk\]/g, " ").replace(/\s+/g, " ").trim();
-      if (!text || h.used || speaking || busy || muted) return;
-      if (lastChromeAt >= h.start - 500) return; // Chrome heard this too: its own path handles it
-      const now = Date.now();
-      const d = window.AlexaWake.decide([text], { now, awakeUntil, followUpUntil, speechAt: h.start, openMic: OPEN_MIC });
-      if (d.action === "awake") {
-        logNote(`chess ears woke me ("${text}"): Chrome heard nothing`);
-        if (device.dataset.state !== "awake") earcon.wake();
-        awakeUntil = now + AWAKE_MS;
-        return restState();
-      }
-      if (d.action === "send") {
-        h.used = true;
-        voskSentUntil = h.end;
-        logNote(`chess ears only: sending "${d.text}" (Chrome heard nothing)`);
-        return send(d.text, d.alternatives, d.text, d.woken);
-      }
-      logNote(`ignored chess ears "${text}" (no wake word)`);
-    }, CHROME_GRACE_MS);
-  });
-
-  // Half a move ("knight…"): recognition ended the phrase at the pause. Hold it and join it to the next phrase.
-  const HOLD_MS = 4000;
-  let held = null; // { alts, startedAt, timer }
-  function flushHeld() {
-    const h = held;
-    held = null;
-    if (h) handleUtterance(h.alts, h.startedAt, true);
-  }
-
-  function handleUtterance(alts, startedAt, fromHold = false) {
-    const now = Date.now();
-    if (startedAt && startedAt <= voskSentUntil + 500) return logNote(`skipped Chrome's late "${alts[0]}" (already sent from chess ears)`);
-    if (held) {
-      clearTimeout(held.timer);
-      const first = held.alts[0];
-      alts = alts.map((a) => `${first} ${a}`);
-      startedAt = held.startedAt;
-      held = null;
-      logNote(`joined into "${alts[0]}"`);
-    } else if (!fromHold && window.AlexaWake.incomplete(alts[0])) {
-      held = { alts, startedAt, timer: setTimeout(flushHeld, HOLD_MS) };
-      logNote(`holding "${alts[0]}" for the rest of the move`);
-      return;
-    }
-    if (window.AlexaWake.isSleepCommand(alts)) return sleepByVoice();
-    // ...unless another reading was chess ("pause" | "pawn"): then it goes to her like anything else.
-    if (window.AlexaWake.isOnlyStop(alts[0]) && !window.AlexaWake.soundsLikeChess(alts.slice(1))) return logNote(`"${alts[0]}": nothing to stop`);
-    const d = window.AlexaWake.decide(alts, { now, awakeUntil, followUpUntil, speechAt: startedAt, openMic: OPEN_MIC });
-    if (d.action === "send") return sendWithChessEars(d, startedAt || now, now);
-    if (d.action === "awake") {
-      if (device.dataset.state !== "awake") earcon.wake();
-      awakeUntil = now + AWAKE_MS;
-      return restState();
-    }
-    // Background talk without the wake word: ignore, but let the ring settle.
-    const closedFor = Math.round((now - Math.max(awakeUntil, followUpUntil)) / 1000);
-    logNote(`ignored "${alts[0]}" (no wake word; listening window closed ${closedFor > 9999 ? "long ago" : `${closedFor} s ago`})`);
-    if (device.dataset.state === "awake") restState();
-  }
-
-  /** Pair Chrome's utterance with what chess ears (vosk.js) heard over the same time, then send both. */
-  async function sendWithChessEars(d, from, to) {
-    const ears = window.ChessEars;
-    if (ears?.state !== "listening") return send(d.text, d.alternatives, undefined, d.woken);
-    const chessHeard = await ears.hear(from, to);
-    logNote(`chess ears: ${chessHeard ? `"${chessHeard}"` : "nothing usable"}`);
-    return send(d.text, d.alternatives, chessHeard, d.woken);
-  }
-
-  // ---------- a recognizer language that goes deaf ----------
-  // Chrome's en-IN service once returned nothing for hours, with no error: speech detected, zero words. After two
-  // such sessions in a row, switch to English (US) so the wake word keeps working.
-  // In en-US too it can go deaf the same way: then a fresh recognizer (returns true) instead of another language.
-  let heardSpeech = false, gotWords = false, deafSessions = 0;
-  function checkLanguageHealth() {
-    if (speaking || muted) return false;
-    deafSessions = heardSpeech && !gotWords ? deafSessions + 1 : 0;
-    if (deafSessions < 2) return false;
-    deafSessions = 0;
-    if (langSel.value === "en-US") return true;
-    logNote(`${langSel.value} heard speech but returned no words twice: switching to en-US`);
-    langSel.value = "en-US";
-    return false;
-  }
-
-  function startListening() {
-    wantListening = true;
-    if (!recognition || listening || muted || speaking || busy) return;
-    recognition.lang = langSel.value;
-    try { recognition.start(); } catch { /* already started */ }
-  }
-  function pauseListening() {
-    window.ChessEars?.pause();
-    if (recognition && listening) recognition.abort();
-  }
-  function resumeListening() {
-    if (!wantListening || muted) return;
-    window.ChessEars?.resume();
-    setTimeout(startListening, 150);
-  }
+  }, 5000);
 
   // ---------- controls ----------
   function toggleMute() {
     muted = !muted;
     if (muted) {
-      if (held) { clearTimeout(held.timer); held = null; }
-      pauseListening();
       stopSpeaking();
+      closeSonic();
       setState("muted", "Microphone off");
     } else {
       restState();
       live.textContent = "Microphone on";
-      window.ChessEars?.resume();
-      startListening();
+      lastUserAt = Date.now();
+      openSonic("unmuted");
     }
   }
 
-  /** "Pause" / "stop listening": the open mic closes until the speaker is tapped (or M is pressed). */
+  /** "Pause" / "stop listening": the mic closes until the speaker is tapped (or M is pressed). */
   function sleepByVoice() {
     if (muted) return;
     logNote("paused by voice: tap the speaker or press M to talk again");
+    earcon.sleep();
     toggleMute();
-    browserSpeak("Okay, I'll stop listening. Tap me when you want me back.", () => {});
+    live.textContent = "Paused. Tap the speaker to talk again.";
   }
 
-  const READY = OPEN_MIC ? "Listening. Just talk, no wake word needed." : "Ready. Say Alexa to talk.";
   startBtn.addEventListener("click", async () => {
     started = true;
-    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    outCtx = new AudioContext({ sampleRate: 24000 });
     startEl.hidden = true;
     earcon.wake();
-    if (!recognition) {
-      setState("error", "Voice input needs Chrome or Edge. Press D to type instead.");
-      return;
+    if (!config?.sonic) {
+      setState("error", "The voice isn't set up on this site yet. Press D to type.");
+      return logNote("config.json has no sonic settings: deploy with scripts/deploy.ps1", "error");
     }
-    setState(OPEN_MIC ? "followup" : "idle", READY);
-    await prepareOnDevice();
-    DS?.status(`ears: Chrome speech recognition (${langSel.value})${onDevice ? ", on this computer" : ""}, one phrase at a time`);
-    startListening();
-    if (EARS_ON) window.ChessEars?.start(); // optional second recognizer; stays off if its model isn't there
+    try {
+      await startMic();
+    } catch (err) {
+      // No microphone: typed turns (D) still get her voice. Sonic needs a steady audio stream, so it gets silence.
+      setState("error", "I need the microphone. Allow it and reload, or press D to type.");
+      logNote(`microphone: ${err.message || err}; typing only (press D)`, "error");
+      setInterval(() => { if (sonic && !muted) sonic.audio(silence); }, 32);
+      lastUserAt = Date.now();
+      return openSonic("typing only");
+    }
+    setState("followup", "Listening. Just talk, no wake word needed.");
+    DS?.status(`ears: Nova 2 Sonic (${config.sonic.region}, ${voiceId})${BARGE_IN ? ", barge-in on" : ", half-duplex"}`);
+    lastUserAt = Date.now();
+    openSonic("start");
   });
 
-  device.addEventListener("click", () => { if (started) { if (speaking) stopSpeaking(); else toggleMute(); } });
+  device.addEventListener("click", () => { if (started) { if (isSpeaking()) stopSpeaking(); else toggleMute(); } });
 
   document.addEventListener("keydown", (e) => {
     if (e.target instanceof HTMLInputElement || e.target instanceof HTMLSelectElement) return;
     if (e.key === "d" || e.key === "D") { debugEl.hidden = !debugEl.hidden; }
     else if (e.key === "m" || e.key === "M") { if (started) toggleMute(); }
-    else if (e.key === "Escape") { stopSpeaking(); }
-    else if (e.code === "Space" && started && !muted) {
-      // Keyboard "action button": cuts her off while she talks, otherwise the same as saying "Alexa".
-      e.preventDefault();
-      if (speaking) return stopSpeaking();
-      earcon.wake();
-      awakeUntil = Date.now() + AWAKE_MS;
-      restState();
-    }
+    else if (e.key === "Escape" || e.code === "Space") { if (isSpeaking()) { e.preventDefault(); stopSpeaking(); } }
   });
 
   $("close-debug").addEventListener("click", () => { debugEl.hidden = true; });
-  $("type-form").addEventListener("submit", (e) => {
+  $("type-form").addEventListener("submit", async (e) => {
     e.preventDefault();
     const input = $("type-input");
-    const t = input.value;
+    const t = input.value.trim();
     input.value = "";
-    if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-    send(t, [t]);
+    if (!t || !config) return;
+    // Typed words go through Sonic like speech, so she says the reply; before the start tap, the reply is only shown.
+    if (sonic) { logNote(`typed "${t}"`, "sent"); lastUserAt = Date.now(); dropAudio = false; heardLog.push(t); sonic.text(t); }
+    else await askAgent(t, [t]);
   });
   $("new-session").addEventListener("click", () => {
     sessionId = newId();
@@ -636,26 +456,24 @@
     debugLog.innerHTML = "";
     live.textContent = "New session";
   });
-  // en-US by default: on 2026-10-16 afternoon Chrome's en-IN recognizer silently returned no words at all (bare
-  // A/B test, none of our code: en-IN 0 results, en-US fine on the same mic), and en-US hears chess moves well. The
-  // drawer's picker still switches it. (A new key, so a choice saved under the old one starts from en-US again.)
-  const LANG_KEY = "alexaChess.sttLang";
-  langSel.value = store.get(LANG_KEY, "en-US");
-  langSel.addEventListener("change", () => {
-    store.set(LANG_KEY, langSel.value);
-    if (listening) recognition.abort(); // restarts with the new language
-  });
-  logNote(`build ${BUILD} · listening with Chrome speech recognition (${langSel.value}), one phrase at a time · ${OPEN_MIC ? "open mic, no wake word (?wake=1 for \"Alexa\")" : "wake word \"Alexa\""}${EARS_ON ? " · chess ears ON" : ""}`);
-  if (EARS_ON) window.ChessEars?.init({ log: logNote }); // fetch the chess-ears model while the start screen is up
-  if (!Recognition) startNote.textContent = "This browser has no speech recognition. Use Chrome or Edge, or press D to type.";
+  // Cost so far this page load, at the ap-northeast-1 prices (2026-10-23), in the drawer every minute.
+  setInterval(() => {
+    if (!started || !usage.speechIn) return;
+    const usd = (usage.speechIn * 0.00363 + usage.speechOut * 0.01452 + usage.textIn * 0.000396 + usage.textOut * 0.003311) / 1000;
+    $("debug").querySelector("strong").textContent = `Debug · voice $${usd.toFixed(3)} so far`;
+  }, 60000);
+
+  logNote(`build ${BUILD} · voice: Nova 2 Sonic, speech to speech · ${BARGE_IN ? "barge-in on (use headphones)" : "half-duplex: tap or Esc to interrupt"}`);
+  if (!window.AudioWorkletNode || !navigator.mediaDevices?.getUserMedia) startNote.textContent = "This browser can't stream the microphone. Use a recent Chrome, Edge, Safari or Firefox, or press D to type.";
 
   // ---------- config + warm-up ----------
   fetch("config.json", { cache: "no-store" })
     .then((r) => r.json())
     .then((c) => {
-      agentUrl = c.agentUrl;
-      // Wake the Lambdas while the user is still reading the start screen.
-      fetch(agentUrl, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ warm: true }) }).catch(() => {});
+      config = c;
+      // Wake the Lambdas and fetch guest credentials while the user is still reading the start screen.
+      fetch(c.agentUrl, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ warm: true }) }).catch(() => {});
+      if (c.sonic) credentials().catch((err) => logNote(`voice credentials: ${err.message || err}`, "error"));
     })
     .catch(() => { startNote.textContent = "Couldn't load config.json. Deploy the site with scripts/deploy.ps1."; });
 })();

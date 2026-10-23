@@ -12,12 +12,12 @@
     "eval": "node --import ./scripts/md-loader.mjs --import tsx scripts/converse-eval.ts",
     "qa": "node --import ./scripts/md-loader.mjs --import tsx scripts/qa-eval.ts",
     "sim": "node --import ./scripts/md-loader.mjs --import tsx scripts/game-sim.ts",
-    "rival": "node --import ./scripts/md-loader.mjs --import tsx scripts/rival-sim.ts"
+    "rival": "node --import ./scripts/md-loader.mjs --import tsx scripts/rival-sim.ts",
+    "sonic": "node --import ./scripts/md-loader.mjs --import tsx scripts/sonic-sim.ts"
   },
   "dependencies": {
     "@aws-sdk/client-bedrock-runtime": "^3.1152.0",
     "@aws-sdk/client-dynamodb": "^3.1152.0",
-    "@aws-sdk/client-polly": "^3.1152.0",
     "@aws-sdk/client-secrets-manager": "^3.1152.0",
     "@aws-sdk/lib-dynamodb": "^3.1152.0",
     "@modelcontextprotocol/client": "^2.3.1",

@@ -3,13 +3,11 @@ import { createServer } from "node:http";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { BedrockRuntimeClient, ConverseCommand } from "@aws-sdk/client-bedrock-runtime";
-import { PollyClient } from "@aws-sdk/client-polly";
 import { runTurn } from "../src/agent.js";
 import { McpChessTools } from "../src/mcpClient.js";
 import { MemorySessionStore } from "../src/sessions.js";
-import { pollySpeaker } from "../src/voice.js";
 
-// Local agent with the same POST contract as the Lambda: real Bedrock + Polly, sessions in memory.
+// Local agent with the same POST contract as the Lambda: real Bedrock, sessions in memory (the page speaks with Nova 2 Sonic).
 // Pair it with the local MCP server (packages/mcp-server: npm run dev) and scripts/serve-web.mjs.
 //   npm run dev   ->  http://127.0.0.1:3002/
 
@@ -23,7 +21,6 @@ const deps = {
   tools: new McpChessTools(process.env.MCP_URL ?? "http://127.0.0.1:3001/mcp", async () => process.env.MCP_TOKEN ?? "local"),
   sessions: new MemorySessionStore(),
   modelId: process.env.MODEL_ID ?? "global.amazon.nova-2-lite-v1:0", // what production runs, and cheaper than Nova Pro
-  speak: pollySpeaker(new PollyClient({ region })),
 };
 
 createServer(async (req, res) => {
@@ -58,7 +55,7 @@ createServer(async (req, res) => {
     const woken = body.woken !== false;
     const result = await runTurn(deps, body.sessionId, { text: body.text, alternatives, chessHeard, woken });
     const tm = result.timings;
-    console.log(`🧑 ${woken ? "" : "(no wake word) "}${body.text}${chessHeard ? `  👂 ${chessHeard}` : ""}  →  ${result.ignored ? "🔇 ignored" : `🔵 ${result.reply}`}  (${Date.now() - t} ms${tm ? `: model ${tm.modelMs}, tools ${tm.toolMs}, voice ${tm.ttsMs}${tm.fastPath ? ", fast path" : ""}` : ""}; tools: ${result.toolCalls.map((c) => c.name).join(",") || "-"})`);
+    console.log(`🧑 ${woken ? "" : "(no wake word) "}${body.text}${chessHeard ? `  👂 ${chessHeard}` : ""}  →  ${result.ignored ? "🔇 ignored" : `🔵 ${result.reply}`}  (${Date.now() - t} ms${tm ? `: model ${tm.modelMs}, tools ${tm.toolMs}${tm.fastPath ? ", fast path" : ""}` : ""}; tools: ${result.toolCalls.map((c) => c.name).join(",") || "-"})`);
     // Every turn goes to a JSONL file too, so a real game can be replayed and measured afterwards.
     try {
       mkdirSync(LIVE_DIR, { recursive: true });

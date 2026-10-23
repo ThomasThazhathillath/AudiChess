@@ -941,3 +941,76 @@ of Chrome's newer on-device recognizer, which does take hints.
 word Chrome hears worst.
 
 **Tests:** chess server 175 (7 new, from the logged phrases), agent 79, page 59 checks.
+
+## Phase 9 — Nova 2 Sonic speech to speech (2026-10-23)
+
+Chrome's recognizer misheard too much ("porn", "phone", "text phone"), and Polly / the browser voice mispronounced.
+Both are gone. The page now streams the microphone to **Amazon Nova 2 Sonic** and plays Sonic's voice.
+
+**How it works:**
+- **Sonic is only the ears and the voice.** For every turn it calls one tool, `alexa`. The page answers that tool
+  with the agent (Nova 2 Lite, unchanged), and Sonic says the reply word for word. Nothing the agent does (moves,
+  banter, routing, evals) changed.
+- **No server in the audio path.** The page opens Sonic's bidirectional stream itself, over a WebSocket, with the
+  AWS SDK (`web/vendor/bedrock-sonic.js`, built by `scripts/build-sonic-sdk.mjs`; not in git).
+- **Credentials:** a Cognito identity pool in guest mode, using the classic flow (an OpenID token, then STS
+  `AssumeRoleWithWebIdentity`). The guest role can only call `bedrock:InvokeModel` /
+  `InvokeModelWithBidirectionalStream` on `amazon.nova-2-sonic-v1:0`. The enhanced flow can't be used: its session
+  policy never allows Bedrock.
+- **Region ap-northeast-1 (Tokyo):** Sonic isn't offered in ap-south-1. Everything else stays in ap-south-1.
+- **Voice:** Kiara (Indian English) by default. "Indian male" (Arjun), American (Tiffany / Matthew), British
+  (Amy) and Australian (Olivia) switch it. The voice applies from the next stream. Speaking speed can't be changed.
+- **Language is locked to English.** The system prompt has a "LANGUAGE LOCK" line, plus Sonic's documented
+  Latin-script speech prompt. Without them, Kiara wrote "let's play chess" in Devanagari.
+- **Half-duplex by default:** while she talks, Sonic gets silence, so she can't hear herself through the speakers.
+  Tap, Esc or Space interrupts her. `?bargein=1` streams the mic all the time, for headphones.
+- **Streams:** a stream lasts 8 minutes at most, so a fresh one opens between turns after 7. A stream that fails
+  reconnects with backoff. After 5 minutes with nobody speaking, the page stops streaming (tap to come back).
+- **No microphone:** typed turns (D) still go through Sonic and are spoken.
+- **Debug screen:** it now shows on localhost only (or with `?debug=1`), so it's gone from the live site. The
+  hidden D drawer stays.
+
+**Removed:** Polly (`voice.ts` now only lists Sonic voices; the IAM permission and SDK dependency are gone), the
+browser voice, Chrome speech recognition and its watchdogs, the wake-word mode, Vosk chess ears (`web/vosk.js`,
+`get-vosk-model.ps1`, the models upload), and the language picker.
+
+**Fixed along the way** (found by the harness):
+- Sonic called the tool up to 25 times when the agent's answer was silence. The agent now gets one call per thing
+  the user said; repeat calls get an empty answer that says "stay silent".
+- Sonic writes squares as "e-four", which the agent dropped as background talk. `AlexaSonic.clean` turns it into
+  "e four".
+- "I'm easy level" tripped Sonic's content filter once. The new-game instruction now says "easy level", never
+  "I'm easy". Nova 2 Lite doesn't always follow it.
+- Endpointing is `HIGH`: Sonic notices sooner that the user has stopped talking.
+
+**Evaluation** (`npm run sonic`): Windows' built-in voice reads 10 phrases (`scripts/make-sonic-audio.ps1`, free),
+streamed in real time to Sonic, with tool calls going to the real agent.
+
+| round | changes | heard right | said word for word | repeat tool calls | first sound (avg / max) | cost |
+|---|---|---|---|---|---|---|
+| 1 | first try, Kiara | 8/10 (one in Devanagari) | 2/10 (and misaligned) | 45 | 4.1 / 5.0 s | $0.025 |
+| 2 | speech prompt, one call per turn | 10/10 | 9/10 (content filter) | 0 | 2.7 / 5.2 s | $0.021 |
+| 3 | English lock, HIGH endpointing | 10/10 | 10/10 | 0 | 2.2 / 3.6 s | $0.020 |
+| 4 | "e-four" cleaned | 10/10, all moves played | 10/10 | 0 | 2.3 / 5.3 s | $0.025 |
+
+- **Where the time goes:** Sonic calls the tool about 0.9 s after the phrase ends. The agent takes about 0.7 s,
+  and Sonic starts speaking about 0.6 s later. The slow turns are model turns ("easy": the agent took 2.4 s).
+- **Cost:** about $0.012 a minute of steady talking (output speech is most of it). That's roughly $0.20–0.35 for a
+  30-minute game, depending on how much she talks. Ten seconds of silence added no speech tokens in the harness, but
+  that isn't proven for long silences. The drawer shows the running voice cost.
+
+**Live check** (deployed, browser pane, no microphone there, so typed turns):
+- the stream opened with guest credentials;
+- "let's play chess", "white, easy", "e4" and "what was your last move?" went through Sonic to the agent;
+- the last reply played as 4.7 s of Kiara audio;
+- the debug screen is absent.
+
+**Not yet played with a real microphone:** echo through speakers, Sonic's hearing of a real voice, and the
+7-minute stream renewal.
+
+**Tests:** agent 79, page 59 wake checks plus 17 Sonic checks (`node scripts/test-wake.mjs`: event order, English
+lock, one agent call per turn, transcript cleaning). `sam validate --lint` passes.
+
+**Cost of this phase:** about $0.10 (4 harness runs $0.091, live browser check about $0.01).
+
+**Deployed 2026-10-23** (build `sonic-1`, https://d2ammv4cvnzsu5.cloudfront.net).

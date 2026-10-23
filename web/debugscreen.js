@@ -1,5 +1,5 @@
-// Always-visible debug screen (until the app is fully tuned): what the mic hears, live, and what happened to
-// each utterance. Hide it with ?debug=0. No dependencies; app.js feeds it.
+// Debug screen for local testing: what Sonic hears, live, and what happened to each utterance. app.js shows it only
+// on localhost (or with ?debug=1), never on the live site by default. No dependencies; app.js feeds it.
 (function (root) {
   "use strict";
 

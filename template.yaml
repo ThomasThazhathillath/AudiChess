@@ -1,6 +1,6 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Transform: AWS::Serverless-2016-10-31
-Description: Alexa Chess - blind chess by voice. MCP server (Streamable HTTP), Bedrock agent, Echo simulator website.
+Description: Alexa Chess - blind chess by voice. MCP server (Streamable HTTP), Bedrock agent, Nova 2 Sonic voice, Echo simulator website.
 
 # Naming: everything is prefixed alexa_chess. CloudFormation stack names and S3 bucket names
 # don't allow underscores (and buckets must be lowercase and globally unique), so those two use
@@ -11,6 +11,13 @@ Parameters:
     Type: String
     Description: Bedrock inference profile used by the agent. Nova 2 Lite won the A/B test (best banter, about $0.05 per game with prompt caching); apac.amazon.nova-pro-v1:0 and apac.amazon.nova-lite-v1:0 also work.
     Default: global.amazon.nova-2-lite-v1:0
+  SonicRegion:
+    Type: String
+    Description: Region the page streams Nova 2 Sonic (speech to speech) in. Sonic is not offered in ap-south-1; Tokyo is the nearest.
+    Default: ap-northeast-1
+  SonicModelId:
+    Type: String
+    Default: amazon.nova-2-sonic-v1:0
   AllowedOrigin:
     Type: String
     Description: Browser origin allowed to call the agent (the CloudFront URL once known).
@@ -193,10 +200,6 @@ Resources:
               Resource:
                 - arn:aws:bedrock:*::foundation-model/*
                 - !Sub arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:inference-profile/*
-            # Alexa's voice: Polly neural text-to-speech (SynthesizeSpeech has no resource-level scoping).
-            - Effect: Allow
-              Action: polly:SynthesizeSpeech
-              Resource: "*"
     Metadata:
       BuildMethod: esbuild
       BuildProperties:
@@ -218,6 +221,50 @@ Resources:
       FunctionName: !Ref AgentFunction
       Principal: "*"
       InvokedViaFunctionUrl: true
+
+  # ---------- Voice: Nova 2 Sonic, streamed straight from the page ----------
+  # The page gets short-lived guest credentials from this identity pool, by the classic flow (an OpenID token, then
+  # STS AssumeRoleWithWebIdentity): the enhanced flow adds a session policy that never allows Bedrock. They can do one thing: open a Nova 2 Sonic
+  # speech-to-speech stream (no Lambda in the audio path, so nothing runs while nobody plays). Sonic hears the player
+  # and speaks; the agent above still decides every reply (Sonic calls it as a tool from the page).
+  SonicIdentityPool:
+    Type: AWS::Cognito::IdentityPool
+    Properties:
+      IdentityPoolName: alexa_chess_sonic
+      AllowUnauthenticatedIdentities: true
+      AllowClassicFlow: true
+
+  SonicGuestRole:
+    Type: AWS::IAM::Role
+    Properties:
+      MaxSessionDuration: 3600
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Federated: cognito-identity.amazonaws.com }
+            Action: [sts:AssumeRoleWithWebIdentity]
+            Condition:
+              StringEquals:
+                cognito-identity.amazonaws.com:aud: !Ref SonicIdentityPool
+              ForAnyValue:StringLike:
+                cognito-identity.amazonaws.com:amr: unauthenticated
+      Policies:
+        - PolicyName: alexa_chess_sonic_stream
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                # Bedrock authorizes the stream as InvokeModel too (AccessDenied without it, 2026-10-23).
+                Action: [bedrock:InvokeModel, bedrock:InvokeModelWithBidirectionalStream]
+                Resource: !Sub arn:aws:bedrock:${SonicRegion}::foundation-model/${SonicModelId}
+
+  SonicIdentityPoolRoles:
+    Type: AWS::Cognito::IdentityPoolRoleAttachment
+    Properties:
+      IdentityPoolId: !Ref SonicIdentityPool
+      Roles:
+        unauthenticated: !GetAtt SonicGuestRole.Arn
 
   # ---------- Website (S3 + CloudFront) ----------
   WebsiteBucket:
@@ -289,6 +336,16 @@ Outputs:
   WebsiteUrl:
     Description: Echo simulator
     Value: !Sub https://${WebsiteDistribution.DomainName}
+  SonicIdentityPoolId:
+    Description: Cognito identity pool the page gets Nova 2 Sonic guest credentials from
+    Value: !Ref SonicIdentityPool
+  SonicGuestRoleArn:
+    Description: Role the page assumes (classic Cognito flow) to open Sonic streams
+    Value: !GetAtt SonicGuestRole.Arn
+  SonicRegion:
+    Value: !Ref SonicRegion
+  SonicModelId:
+    Value: !Ref SonicModelId
   WebsiteBucketName:
     Value: !Ref WebsiteBucket
   DistributionId:

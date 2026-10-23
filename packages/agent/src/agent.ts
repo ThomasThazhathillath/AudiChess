@@ -8,7 +8,7 @@ import type {
 } from "@aws-sdk/client-bedrock-runtime";
 import type { ChessTools, McpTool } from "./mcpClient.js";
 import { type Chattiness, type Session, type SessionStore, newSession, touch } from "./sessions.js";
-import { DEFAULT_VOICE, type Speak, VOICES } from "./voice.js";
+import { VOICES, sonicVoice } from "./voice.js";
 import { decodeMove } from "./guessMove.js";
 import { type Banter, pickBanter } from "./banter.js";
 import skill from "../skills/blind-chess/SKILL.md";
@@ -20,8 +20,6 @@ export interface AgentDeps {
   tools: ChessTools;
   sessions: SessionStore;
   modelId: string;
-  /** Text-to-speech; when absent the browser speaks the text itself. */
-  speak?: Speak;
   /** Bedrock prompt caching for the static skill + tool list (default on). */
   promptCache?: boolean;
 }
@@ -50,15 +48,14 @@ export interface TurnResult {
   /** True when the utterance was background talk: nothing is said and the page keeps listening. */
   ignored?: boolean;
   /** Where the time went, in milliseconds. */
-  timings?: { modelMs: number; toolMs: number; ttsMs: number; totalMs: number; fastPath: boolean };
+  timings?: { modelMs: number; toolMs: number; totalMs: number; fastPath: boolean };
   reply: string;
   gameId?: string;
   gameOver: boolean;
   /** True when Alexa asked a question and expects an answer (the page keeps listening without the wake word). */
   expectsReply: boolean;
   toolCalls: ToolTrace[];
-  /** base64 MP3 from Polly, when available. */
-  audio?: string;
+  /** The Nova 2 Sonic voice the page speaks with ("kiara"). */
   voice: string;
   usage: { inputTokens: number; outputTokens: number; cacheReadTokens: number; cacheWriteTokens: number; rounds: number };
 }
@@ -81,14 +78,13 @@ const LOCAL_TOOLS: Tool[] = [
     toolSpec: {
       name: "set_preferences",
       description:
-        "Change how Alexa talks: chattiness ('talk less' -> brief, 'just the moves' -> minimal, 'talk more' / 'normal' -> chatty), voice accent, or speaking speed ('slower', 'faster', 'normal').",
+        "Change how Alexa talks: chattiness ('talk less' -> brief, 'just the moves' -> minimal, 'talk more' / 'normal' -> chatty) or voice accent. Her speaking speed can't be changed.",
       inputSchema: {
         json: {
           type: "object",
           properties: {
             chattiness: { type: "string", enum: ["minimal", "brief", "chatty"] },
             voice: { type: "string", enum: Object.keys(VOICES) },
-            speed: { type: "string", enum: ["slower", "normal", "faster"] },
             confirmMoves: { type: "boolean", description: "true: repeat each move back and play it only after a yes ('confirm each move before playing it')." },
           },
         },
@@ -330,7 +326,7 @@ export function factsForModel(name: string, content: Record<string, unknown>, is
     const firstMove = typeof content.engineMoveSpoken === "string"
       ? `I (Alexa, playing ${content.humanColor === "White" ? "Black" : "White"}) opened with ${content.engineMoveSpoken}`
       : "none: the user plays White and moves first. Do not announce any move of yours.";
-    return { ...facts, firstMove, instruction: "Announce the new game in your own words: their colour, the level name, and the first move only if I made one." };
+    return { ...facts, firstMove, instruction: "Announce the new game in your own words: their colour, the level name (as \"easy level\", never \"I'm easy\"), and the first move only if I made one." };
   }
   // A rival, not a coach (2026-10-17): no better move, no warnings about attacked pieces, no "you've been slipping",
   // and none of her own threats. The user asks for those when they want them.
@@ -782,9 +778,6 @@ function handleLocalTool(name: string, args: Record<string, unknown>, session: S
     next.voice = VOICES[args.voice].id;
     changes.push(`switching to my ${args.voice.replace(/\b\w/g, (c) => c.toUpperCase())} voice`);
   }
-  if (args.speed === "slower") { next.rate = Math.max(75, (session.rate ?? 100) - 15); changes.push("I'll speak more slowly"); }
-  if (args.speed === "faster") { next.rate = Math.min(125, (session.rate ?? 100) + 15); changes.push("I'll speak a little faster"); }
-  if (args.speed === "normal") { next.rate = 100; changes.push("normal speed again"); }
   if (typeof args.confirmMoves === "boolean") {
     next.confirmMoves = args.confirmMoves;
     changes.push(args.confirmMoves ? "I'll repeat each move and wait for your yes" : "I'll play your moves straight away");
@@ -794,7 +787,7 @@ function handleLocalTool(name: string, args: Record<string, unknown>, session: S
 
 export async function runTurn(deps: AgentDeps, sessionId: string, input: TurnInput | string): Promise<TurnResult> {
   const started = Date.now();
-  const timings = { modelMs: 0, toolMs: 0, ttsMs: 0, totalMs: 0, fastPath: false };
+  const timings = { modelMs: 0, toolMs: 0, totalMs: 0, fastPath: false };
   const { text: rawIn, alternatives = [], chessHeard: rawChess, woken = true } = typeof input === "string" ? ({ text: input } as TurnInput) : input;
   const rawText = typeof rawIn === "string" ? rawIn : ""; // a request without text once crashed stripWakeWord
   const userText = stripWakeWord(rawText) || rawText.trim();
@@ -813,7 +806,7 @@ export async function runTurn(deps: AgentDeps, sessionId: string, input: TurnInp
     gameOver: session.gameOver === true,
     expectsReply: false,
     toolCalls,
-    voice: session.voice ?? DEFAULT_VOICE,
+    voice: sonicVoice(session.voice),
     usage,
     timings: { ...timings, totalMs: Date.now() - started },
   });
@@ -1226,10 +1219,6 @@ export async function runTurn(deps: AgentDeps, sessionId: string, input: TurnInp
   if (!repeated) session.turns = [...session.turns, { role: "user", text: userText }, { role: "assistant", text: reply }];
   await deps.sessions.put(touch(session));
 
-  const voice = session.voice ?? DEFAULT_VOICE;
-  const t = Date.now();
-  const audio = deps.speak ? await deps.speak(reply, voice, session.rate ?? 100) : undefined;
-  timings.ttsMs = Date.now() - t;
   timings.totalMs = Date.now() - started;
   return {
     reply,
@@ -1237,8 +1226,7 @@ export async function runTurn(deps: AgentDeps, sessionId: string, input: TurnInp
     gameOver: session.gameOver === true,
     expectsReply: asksQuestion(reply),
     toolCalls,
-    audio,
-    voice,
+    voice: sonicVoice(session.voice),
     usage,
     timings,
   };

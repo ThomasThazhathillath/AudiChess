@@ -1,4 +1,4 @@
-// Tests for web/wake.js (the wake-word gate) and the pure parts of web/vosk.js (chess ears).
+// Tests for web/wake.js (the wake-word gate) and web/sonic.js (the Nova 2 Sonic session), no AWS.
 // Run: node scripts/test-wake.mjs
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
@@ -75,76 +75,69 @@ assert.equal(incomplete("pwn"), true);
 assert.equal(incomplete("pont takes"), true);
 console.log(`wake.js: ${n + 11 + 5 + 14 + 7 + 10} checks passed`);
 
-// ---------- vosk.js: timeline, hearings, pairing with Chrome ----------
-new Function(readFileSync(new URL("../web/vosk.js", import.meta.url), "utf8"))();
-const ears = globalThis.ChessEars;
-let m = 0;
-const check = (fn) => { fn(); m++; };
+// ---------- sonic.js: transcripts, event order, one agent call per turn ----------
+new Function(readFileSync(new URL("../web/sonic.js", import.meta.url), "utf8"))();
+const Sonic = globalThis.AlexaSonic;
+let s = 0;
+for (const [heard, want] of [["e-four.", "e four"], ["knight f-three.", "knight f three"], ["what should i have played?", "what should i have played?"], ["Bishop c-four!", "Bishop c four"], ["  let's play chess. ", "let's play chess"]]) {
+  assert.equal(Sonic.clean(heard), want, heard);
+  s++;
+}
 
-check(() => {
-  // 100 ms chunks at 16 kHz from wall 10 000 ms; a pause, then audio again from 20 000 ms.
-  const tl = ears.createTimeline(16000);
-  for (let i = 1; i <= 10; i++) tl.feed(1600, 10000 + i * 100); // 1 s of audio ending at 11 000
-  assert.equal(tl.wall(0), 10000);
-  assert.equal(tl.wall(0.5), 10500);
-  tl.gap();
-  for (let i = 1; i <= 10; i++) tl.feed(1600, 20000 + i * 100); // stream 1 s.. ends at 21 000
-  assert.equal(tl.wall(1), 20000);
-  assert.equal(tl.wall(1.25), 20250);
-  assert.equal(tl.wall(0.9), 10900); // before the pause still maps to the first segment
-});
-check(() => {
-  // Small jitter keeps the segment; a long stall (main thread busy) re-anchors.
-  const tl = ears.createTimeline(16000);
-  tl.feed(1600, 1100);
-  tl.feed(1600, 1230); // 30 ms late: same segment
-  assert.equal(tl.wall(0.1), 1100);
-  tl.feed(1600, 3000); // 1.6 s late: new segment from here
-  assert.equal(tl.wall(0.2), 2900);
-});
-check(() => {
-  const tl = ears.createTimeline(16000);
-  tl.feed(16000, 6000); // 1 s ending at 6 000 -> stream 0 s = 5 000 ms
-  const vosk = { text: "alexa knight f three", result: [
-    { word: "alexa", start: 0.1, end: 0.4, conf: 1 }, { word: "knight", start: 0.5, end: 0.7, conf: 1 },
-    { word: "f", start: 0.75, end: 0.8, conf: 1 }, { word: "three", start: 0.85, end: 0.95, conf: 0.9 }] };
-  assert.deepEqual(ears.hearingFrom(vosk, tl), { text: "alexa knight f three", start: 5100, end: 5950 });
-  assert.equal(ears.hearingFrom({ text: "" }, tl), null);
-  assert.equal(ears.hearingFrom({ text: "", result: [] }, tl), null);
-});
-check(() => {
-  assert.equal(ears.afterWake("alexa knight f three"), "knight f three");
-  assert.equal(ears.afterWake("pawn alexa alexa e four"), "e four");
-  assert.equal(ears.afterWake("bishop c four"), "bishop c four");
-  assert.equal(ears.usable("[unk] [unk]"), false);
-  assert.equal(ears.usable(""), false);
-  assert.equal(ears.usable("[unk] pawn"), true);
-});
-check(() => {
-  // Chrome: first interim at 5 600, final at 6 500. Vosk heard the move (5 100-5 950) and, earlier, a cough.
-  const hearings = [
-    { text: "[unk]", start: 1000, end: 1300 },
-    { text: "alexa knight f three", start: 5100, end: 5950 },
-    { text: "yes", start: 9000, end: 9300 }, // later speech: not this utterance
-  ];
-  const matches = ears.overlapping(hearings, 5600, 6500);
-  assert.deepEqual(matches.map((h) => h.text), ["alexa knight f three"]);
-  assert.equal(ears.chessText(matches), "knight f three");
-  matches.forEach((h) => { h.used = true; });
-  assert.deepEqual(ears.overlapping(hearings, 5600, 6500), []); // a hearing is sent once
-});
-check(() => {
-  // "Alexa ... knight f3" split into two Vosk results inside one Chrome utterance: joined, oldest first.
-  const hearings = [{ text: "knight f three", start: 3000, end: 3600 }, { text: "alexa", start: 2000, end: 2300 }];
-  assert.equal(ears.chessText(ears.overlapping(hearings, 2500, 4200)), "knight f three");
-  // A short "yes" that ended just before Chrome's first interim result still pairs (slack).
-  assert.equal(ears.chessText(ears.overlapping([{ text: "yes", start: 7000, end: 7300 }], 8000, 8600)), "yes");
-  // Only [unk], or nothing at all: nothing to send.
-  assert.equal(ears.chessText(ears.overlapping([{ text: "[unk]", start: 7000, end: 7300 }], 7000, 8000)), null);
-  assert.equal(ears.chessText([]), null);
-});
-check(() => {
-  // The grammar Vosk is given: chess words, the 8 files as letters, ranks as words, and [unk].
-  for (const w of ["pawn", "knight", "castle", "king side", "a", "h", "one", "eight", "resign", "[unk]"]) assert.ok(ears.GRAMMAR.includes(w), w);
-});
-console.log(`vosk.js: ${m} checks passed`);
+/** A fake Sonic: records the input events and replays scripted output events. */
+function fakeSonic(script) {
+  const sent = [];
+  const out = [];
+  let push;
+  const body = { async *[Symbol.asyncIterator]() { for (;;) { while (out.length) { const e = out.shift(); if (e === "end") return; yield { chunk: { bytes: new TextEncoder().encode(JSON.stringify({ event: e })) } }; } await new Promise((r) => { push = r; }); } } };
+  const emit = (e) => { out.push(e); push?.(); };
+  const send = async (input) => {
+    (async () => { for await (const c of input.body) sent.push(JSON.parse(new TextDecoder().decode(c.chunk.bytes)).event); })();
+    setTimeout(() => script(emit), 0);
+    return { body };
+  };
+  return { send, sent };
+}
+const tick = () => new Promise((r) => setTimeout(r, 20));
+{
+  const calls = [];
+  const heard = [];
+  const f = fakeSonic(async (emit) => {
+    emit({ contentStart: { contentId: "u1", type: "TEXT", role: "USER", additionalModelFields: '{"generationStage":"FINAL"}' } });
+    emit({ textOutput: { contentId: "u1", content: "e-four." } });
+    emit({ contentEnd: { contentId: "u1", type: "TEXT", stopReason: "END_TURN" } });
+    emit({ toolUse: { toolUseId: "t1", toolName: "alexa", content: '{"heard":"e four"}' } });
+    await tick();
+    emit({ toolUse: { toolUseId: "t2", toolName: "alexa", content: '{"heard":"e four"}' } }); // Sonic asking again
+    await tick();
+    emit({ completionEnd: {} });
+    emit("end");
+  });
+  let repeats = 0, closed = false;
+  const session = Sonic.open({
+    send: f.send,
+    onUserText: (t) => heard.push(t),
+    onToolUse: async ({ heard: h }) => { calls.push(h); return calls.length === 1 ? "" : "should not be asked"; },
+    onRepeatTool: () => repeats++,
+    onClose: () => { closed = true; },
+  });
+  session.audio(new Int16Array(512));
+  await tick(); await tick(); await tick(); await tick();
+  const kinds = f.sent.map((e) => Object.keys(e)[0]);
+  assert.deepEqual(kinds.slice(0, 9), ["sessionStart", "promptStart", "contentStart", "textInput", "contentEnd", "contentStart", "textInput", "contentEnd", "contentStart"]);
+  assert.equal(f.sent[1].promptStart.audioOutputConfiguration.voiceId, "kiara");
+  assert.equal(f.sent[2].contentStart.role, "SYSTEM");
+  assert.match(f.sent[3].textInput.content, /LANGUAGE LOCK: English only/);
+  assert.equal(f.sent[5].contentStart.role, "SYSTEM_SPEECH");
+  assert.equal(f.sent[8].contentStart.type, "AUDIO");
+  assert.ok(kinds.includes("audioInput"));
+  assert.deepEqual(heard, ["e-four."]);
+  assert.deepEqual(calls, ["e four"], "the agent is asked once per user turn");
+  assert.equal(repeats, 1);
+  const results = f.sent.filter((e) => e.toolResult).map((e) => JSON.parse(e.toolResult.content));
+  assert.equal(results.length, 2);
+  assert.ok(results.every((r) => r.say === "" && /Stay silent/.test(r.instruction)));
+  assert.ok(closed);
+  s += 12;
+}
+console.log(`sonic.js: ${s} checks passed`);

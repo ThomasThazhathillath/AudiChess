@@ -13,7 +13,7 @@ import { spokenSan } from "./converse-eval.js";
 //   - how long her move replies are;
 //   - that nothing coaches ("careful", "under attack", "was better", "you should");
 //   - how a simulated casual player (half engine moves, half random) does against each level.
-// It costs nothing: no Bedrock (a model call fails the run), no Polly.
+// It costs nothing: no Bedrock (a model call fails the run).
 //   PORT=3011 npm run dev --prefix packages/mcp-server   then   npm run rival -- [--games 4] [--levels 1,2,3,4,5,6] [--best 0.55]
 
 const args = process.argv.slice(2);

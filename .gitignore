@@ -5,3 +5,4 @@ dist/
 web/config.json
 samconfig.local.toml
 web/models/
+web/vendor/

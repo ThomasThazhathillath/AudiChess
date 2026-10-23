@@ -4,7 +4,7 @@ import type { LambdaFunctionURLEvent, LambdaFunctionURLResult } from "aws-lambda
 import { type AgentDeps, runTurn } from "./agent.js";
 import { McpChessTools } from "./mcpClient.js";
 import { DynamoSessionStore } from "./sessions.js";
-import { pollySpeaker } from "./voice.js";
+import { DEFAULT_VOICE } from "./voice.js";
 
 const bedrock = new BedrockRuntimeClient({});
 const secrets = new SecretsManagerClient({});
@@ -17,7 +17,6 @@ const deps: AgentDeps = {
   }),
   sessions: new DynamoSessionStore(),
   modelId: process.env.MODEL_ID!,
-  speak: pollySpeaker(),
 };
 
 // CORS headers are added by the Function URL configuration (AllowedOrigin = the CloudFront site).
@@ -75,7 +74,6 @@ export const handler = async (event: LambdaFunctionURLEvent): Promise<LambdaFunc
         model: deps.modelId,
         usage: result.usage,
         timings: result.timings,
-        pollyChars: result.audio ? result.reply.length : 0,
         ms: Date.now() - started,
       }),
     );
@@ -83,7 +81,6 @@ export const handler = async (event: LambdaFunctionURLEvent): Promise<LambdaFunc
   } catch (err) {
     console.error(JSON.stringify({ level: "error", msg: "turn failed", sessionId, error: String(err), stack: (err as Error)?.stack }));
     const reply = "Sorry, I'm having trouble reaching the chess board right now. Please try again in a moment.";
-    const audio = await deps.speak?.(reply, "Kajal", 100);
-    return respond(200, { reply, audio, gameOver: false, expectsReply: false, toolCalls: [], error: true });
+    return respond(200, { reply, voice: DEFAULT_VOICE, gameOver: false, expectsReply: false, toolCalls: [], error: true });
   }
 };

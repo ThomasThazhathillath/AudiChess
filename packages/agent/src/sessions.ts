@@ -21,10 +21,8 @@ export interface Session {
   pending?: { candidates: string[]; asks: number };
   /** How much Alexa comments: "minimal" | "brief" (default) | "chatty". */
   chattiness?: Chattiness;
-  /** Polly voice id, e.g. "Kajal". */
+  /** Nova 2 Sonic voice id, e.g. "kiara". */
   voice?: string;
-  /** Speaking rate as a percentage, 100 = normal. */
-  rate?: number;
   /** Repeat each move back and play it only after a yes. */
   confirmMoves?: boolean;
   /** Jabs and compliments said this game, and how long it has been quiet (banter.ts). */
