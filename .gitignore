@@ -6,3 +6,9 @@ web/config.json
 samconfig.local.toml
 web/models/
 web/vendor/
+
+# Claude Code (local only)
+.claude/
+CLAUDE.md
+CLAUDE.local.md
+.mcp.json

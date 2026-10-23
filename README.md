@@ -137,7 +137,7 @@ npm run dev --prefix packages/agent
 node scripts/serve-web.mjs
 ```
 
-The MCP server runs on port 3001, the agent on 3002 and the page on 5173. `.claude/launch.json` has the same three.
+The MCP server runs on port 3001, the agent on 3002 and the page on 5173.
 Without a microphone, press **D** for the debug drawer and type turns.
 
 ## Deploy
