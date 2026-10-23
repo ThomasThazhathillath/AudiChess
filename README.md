@@ -16,18 +16,31 @@ Tap the speaker and say "Let's play chess". No wake word is needed.
 ## What it's like
 
 > **You:** Let's play chess.
+>
 > **Alexa:** Sure! White or black? And easy, medium or hard?
+>
 > **You:** White, easy.
+>
 > **Alexa:** Alright, we're playing white against me at easy level.
+>
 > **You:** D four.
+>
 > **Alexa:** You play pawn to d4, I play pawn to d5. This is the Queen's Pawn Game.
+>
 > **You:** Bishop f four.
+>
 > **Alexa:** Bishop to f4. I play pawn to a6. This is the Queen's Pawn Game: Accelerated London System.
+>
 > **You:** E three.
+>
 > **Alexa:** Pawn to e3. I play pawn to b5.
+>
 > **You:** C three.
+>
 > **Alexa:** Pawn to c3. I play knight to f6. Ooh, solid.
+>
 > **You:** Oops.
+>
 > **Alexa:** Want to take that back? Just say undo.
 
 *(The lines are from real games on the live build.)*
