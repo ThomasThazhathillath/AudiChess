@@ -140,7 +140,9 @@
     const roles = new Map(); // contentId -> { role, type, stage }
     let ended = false;
 
-    q.push(events.sessionStart(o.endpointing || "HIGH"));
+    // LOW: Sonic waits longest before deciding the user has finished. HIGH answered after four words, mid-sentence
+    // ("it doesnt wait for you to complete a sentence... give 2 secs", 2026-10-23).
+    q.push(events.sessionStart(o.endpointing || "LOW"));
     q.push(events.promptStart(promptName, o.voiceId || "amy"));
     const sys = uuid();
     q.push(events.textStart(promptName, sys, "SYSTEM", false));

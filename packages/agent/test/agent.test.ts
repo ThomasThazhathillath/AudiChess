@@ -344,6 +344,8 @@ describe("Phase 5: lively, non-repeating conversation", () => {
     expect(looksLikeMove("rok E7")).toBe(true);
     expect(looksLikeMove("night takes", "knight takes f7")).toBe(true);
     expect(looksLikeMove("24")).toBe(true); // Transcribe en-IN: "pawn d4"
+    expect(looksLikeMove("me three")).toBe(true); // e3 (2026-10-23 real game)
+    expect(looksLikeMove("tell me three things")).toBe(false);
     expect(looksLikeMove("24", "2")).toBe(true); // with a partial as the second alternative (live bug)
     expect(looksLikeMove("Swansea 4")).toBe(true);
     expect(looksLikeMove("I am 24")).toBe(false);

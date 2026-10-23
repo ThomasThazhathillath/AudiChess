@@ -69,7 +69,7 @@ const FILE_WORDS: Record<string, string> = {
   b: "b", be: "b", bee: "b", bea: "b", bi: "b",
   c: "c", see: "c", sea: "c", si: "c", cee: "c", she: "c",
   d: "d", dee: "d", de: "d", di: "d",
-  e: "e", ee: "e", eat: "e", he: "e", ea: "e",
+  e: "e", ee: "e", eat: "e", he: "e", ea: "e", me: "e", // "me three" = e3 (2026-10-23 real game)
   f: "f", ef: "f", eff: "f", if: "f",
   g: "g", gee: "g", ji: "g", jee: "g", gi: "g",
   h: "h", aitch: "h", age: "h", each: "h", edge: "h", haitch: "h",

@@ -521,7 +521,9 @@ export function answerToPending(text: string, candidates: string[], humanColor?:
 }
 
 const QUESTION_WORDS = /\b(what|which|why|how|where|who|whom|when|can you|could you|can i|could i|should i|may i|am i|is it|is this|is that|is my|are my|if i|would|tell me|explain|did you|do you|are you|is there|repeat|undo|resign|hint)\b/i;
-const SQUARE_ISH = /\b[a-h]\s?[1-8]\b|\b[a-h]\s(?:one|two|three|four|five|six|seven|eight|for|tree|free)\b|\b(?:castle|castles|castling|takes|take)\b|^\W*2[1-8]\W*$|\b(?:twenty|swansea)\s(?:[1-8]|one|two|three|four|five|six|seven|eight)\b/i;
+// A file letter heard as a word ("me three" = e3, "see four"): the model read "me three" as a question and analysed
+// the position three times (2026-10-23 real game).
+const SQUARE_ISH = /\b[a-h]\s?[1-8]\b|\b[a-h]\s(?:one|two|three|four|five|six|seven|eight|for|tree|free)\b|^\W*(?:me|he|be|bee|see|sea|she|dee|gee|ee)\s(?:one|two|three|four|five|six|seven|eight)\W*$|\b(?:castle|castles|castling|takes|take)\b|^\W*2[1-8]\W*$|\b(?:twenty|swansea)\s(?:[1-8]|one|two|three|four|five|six|seven|eight)\b/i;
 
 /** A question by its first word: "Is square f7 occupied?", "Does my knight…", "Should I castle?" (never a move). */
 const QUESTION_START = /^\s*(is|are|am|was|were|does|do|did|has|have|had|should|shall|could|can|would|will|may|might|must|why|what|which|where|who|how|when|tell|explain|describe|read|show|list|give|repeat)\b/i;

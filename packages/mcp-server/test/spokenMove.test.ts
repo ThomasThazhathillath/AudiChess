@@ -23,6 +23,7 @@ describe("stage A: homophones and spoken notation", () => {
     ["pawn to eat four", "e4"],
     ["e for", "e4"],
     ["ee four", "e4"],
+    ["me three", "e3"], // 2026-10-23 real game
     ["porn e4", "e4"],
     ["E4", "e4"],
     ["d4", "d4"],

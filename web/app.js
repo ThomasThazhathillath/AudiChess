@@ -8,7 +8,7 @@
   const device = $("device"), live = $("live"), startEl = $("start"), startBtn = $("start-btn"), startNote = $("start-note");
   const debugEl = $("debug"), debugLog = $("debug-log");
 
-  const BUILD = "sonic-5"; // shown in the debug drawer, to confirm which code the browser runs
+  const BUILD = "sonic-6"; // shown in the debug drawer, to confirm which code the browser runs
 
   const params = new URLSearchParams(location.search);
   const LOCAL = /^(localhost|127\.0\.0\.1|\[::1\])$/.test(location.hostname);
@@ -289,6 +289,7 @@
         if (!t) return;
         lastUserAt = Date.now();
         lastHeardAt = Date.now();
+        renewWhenQuiet = ""; // it hears: not deaf after all
         dropAudio = false;
         repeats = 0;
         heardLog.push(t);
@@ -382,6 +383,9 @@
   registerProcessor("mic", Mic);`;
   const silence = new Int16Array(FRAME);
   let quietUntil = 0; // half-duplex: silence until a moment after she stops (the room's echo)
+  let lastLoudAt = 0; // the last frame with someone talking near the mic
+  let renewWhenQuiet = ""; // a fresh stream is due, as soon as nobody is talking
+  const QUIET_BEFORE_RENEW_MS = 1500;
 
   async function startMic() {
     const stream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true } });
@@ -400,8 +404,15 @@
       if (speaking) quietUntil = Date.now() + 400;
       const gated = !BARGE_IN && (speaking || Date.now() < quietUntil);
       if (gated) mic.gated++;
-      else if (rms > 0.03) mic.loud++; // about -30 dB: somebody talking near the mic (not her, she is gated)
+      else if (rms > 0.03) { mic.loud++; lastLoudAt = Date.now(); } // about -30 dB: somebody talking near the mic (not her, she is gated)
       sonic.audio(gated ? silence : e.data);
+      // A fresh stream only in a pause: closing the old one mid-word lost the start of moves ("e three" became "me
+      // three" and "only three" right after a renew, 2026-10-23 real game).
+      if (renewWhenQuiet && Date.now() - lastLoudAt > QUIET_BEFORE_RENEW_MS && !busy && !speaking) {
+        renewAfterTurn = renewWhenQuiet;
+        renewWhenQuiet = "";
+        maybeRenew();
+      }
     };
     logNote(`mic: ${stream.getAudioTracks()[0]?.label || "default"} at ${ctx.sampleRate} Hz (${ctx.state})`);
   }
@@ -413,13 +424,13 @@
   setInterval(() => {
     if (!started || muted || !mic.frames) return;
     logNote(`mic: level avg ${db(Math.sqrt(mic.sum / mic.frames))} dB, peak ${db(mic.peak)} dB · ${Math.round((mic.frames * FRAME) / 16000)} s sent${mic.gated ? `, ${Math.round((mic.gated * FRAME) / 16000)} s as silence while she spoke` : ""}${sonic ? ` · stream ${Math.round((Date.now() - openedAt) / 1000)} s old` : " · no stream"}`);
-    // Two 10 s windows in a row with over a second of talking each, and Sonic transcribed nothing for 20 s: the stream
-    // has gone deaf, so a fresh one is opened.
+    // Three 10 s windows in a row with over a second of talking each, and Sonic transcribed nothing for 30 s: the
+    // stream may have gone deaf, so a fresh one is opened in the next pause. (Was 20 s and at once: people talking
+    // in the room renewed it every 20-40 s, cutting the player's words, 2026-10-23.)
     mic.loudWindows = (mic.loud * FRAME) / 16000 >= 1 ? mic.loudWindows + 1 : 0;
-    if (sonic && mic.loudWindows >= 2 && Date.now() - Math.max(lastHeardAt, openedAt) > 20000 && !busy && !isSpeaking()) {
+    if (sonic && mic.loudWindows >= 3 && Date.now() - Math.max(lastHeardAt, openedAt) > 30000 && !renewWhenQuiet) {
       mic.loudWindows = 0;
-      renewAfterTurn = "talking at the mic but nothing heard for 20 s";
-      maybeRenew();
+      renewWhenQuiet = "talking at the mic but nothing heard for 30 s";
     }
     Object.assign(mic, { frames: 0, sum: 0, peak: 0, gated: 0, loud: 0 });
   }, 10000);

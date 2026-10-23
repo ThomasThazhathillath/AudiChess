@@ -1236,3 +1236,30 @@ Tests: agent 88, server 175.
 - "How am I doing?" said "a material balance of 7.62", an engine score read as material.
 
 **Cost of this phase:** about $0.08.
+
+### Phase 10c — let the player finish; no restarts mid-word (2026-10-23)
+
+**From the user's real-mic game on `sonic-5`:**
+- "It doesn't wait for you to complete a sentence: it hears like 4 words and immediately responds. Give 2 secs."
+- "Sometimes it registers what you say and other times it doesn't." "E three" came out as "me three" twice and "only
+  three" once, and the model answered each with a position analysis. People were talking nearby (Hindi in the log).
+  The page reopened the Sonic stream every 20-40 s ("talking at the mic but nothing heard for 20 s"), and each
+  garble came within 3-4 s of a reopen. Closing a stream mid-word loses the start of the move.
+
+**Changed (build `sonic-6`):**
+- **Sonic endpointing `LOW`** (was `HIGH`): Sonic waits longest before deciding the user has finished.
+- **The "deaf stream" reopen** now needs 30 s with no transcript (was 20 s), and waits for 1.5 s of quiet at the
+  mic. A transcript cancels it.
+- **"me three" = e3:** the chess server reads "me" as file e (like "he"). The agent sends a sound-alike file word
+  plus a rank ("me three", "see four") straight to the move path, not to the model.
+
+**Checked:**
+- Sonic harness (Indian-accent audio): 10/10 word for word, 0 repeat calls. The extra patience is measurable: end
+  of speech detected after 1.4 s (was 0.3 s), first sound 2.9 s on average (was 2.2 s). $0.026.
+- Live (typed): "me three" played pawn to e3.
+- Tests: server 176, agent 88, page 59 + 30.
+
+**Not verified:** whether `LOW` is patient enough for a real 2 s pause, and whether the quiet-gated reopen stops the
+garbles with a live mic in a noisy room. Both need the user's own game. "Only three" is still a guess for the model.
+
+**Cost:** about $0.03.
