@@ -9,8 +9,21 @@ import { BedrockRuntimeClient, InvokeModelWithBidirectionalStreamCommand } from 
 //   node --import tsx scripts/make-accent-audio.ts      (about $0.01)
 
 const here = dirname(fileURLToPath(import.meta.url));
-const OUT = join(here, "..", "eval-results", "sonic-audio-in");
-const PHRASES = [
+const SET = process.argv[2] ?? "in";
+const OUT = join(here, "..", "eval-results", SET === "in" ? "sonic-audio-in" : `sonic-audio-${SET}`);
+const ROOKS = [
+  ["rook d8", "arjun"],
+  ["rook to d8", "kiara"],
+  ["rook d8 checkmate", "arjun"],
+  ["rook takes d8", "kiara"],
+  ["rook g8", "arjun"],
+  ["rook h1", "kiara"],
+  ["rook a8", "arjun"],
+  ["queen d8", "kiara"],
+  ["knight h4", "arjun"],
+  ["bishop d3", "kiara"],
+] as const;
+const PHRASES = SET === "rook" ? ROOKS : ([
   ["let's play chess", "arjun"],
   ["white, easy", "kiara"],
   ["e4", "arjun"],
@@ -21,7 +34,7 @@ const PHRASES = [
   ["castle kingside", "arjun"],
   ["what was your last move?", "kiara"],
   ["undo", "arjun"],
-] as const;
+] as const);
 
 const client = new BedrockRuntimeClient({ region: "ap-northeast-1" });
 const enc = new TextEncoder();

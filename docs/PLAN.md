@@ -1179,3 +1179,60 @@ Ready to play some blind chess?" instead of waiting in silence.
 
 **Cost of this phase:** about $0.22: 7 chat evals $0.14, 1 game eval $0.013, the Sonic harness $0.023, the local
 checks and the live check about $0.04.
+
+### Phase 10b — rook moves, more banter, no mate hints, split moves (2026-10-23)
+
+**From the user's real-mic game on `sonic-4`:**
+- "Rook d8" was never recognised. Sonic wrote "a jade queen" and "eight queen", and some stretches of 20-40 s had no
+  transcript at all.
+- A garble ("eight queen") went to `analyze_position` and got "You have a forced mate in one": an unasked hint.
+- A split move: "knight h", then "four". The first half got an 8 s list of knight moves, and "four" was lost.
+- Banter: the user first asked for "very less jabs and insults", then said "make banter friendlier, more jabs", then
+  "don't remove insults... I want more of all that". **Decision:** keep every line of the user's list, add friendly
+  ones, and have her speak more often.
+
+**Rook check (`sonic-asr.ts sonic-audio-rook amy:off`, synthetic voice):** rook d8, rook to d8, rook d8 checkmate,
+rook takes d8, rook g8, rook h1 and rook a8 were all written right ("rook d eight"). "Queen d8" became "queen b
+eight". So Sonic knows "rook" in a clear voice; the failures come from the user's mic and accent, which synthetic audio
+can't reproduce. "Book" and "rock" were already read as rook ("book g five" played Rg5 in that game).
+
+**Changed:**
+- **Sonic prompt** (`web/sonic.js`): a move is a piece and a square ("rook d8", "rook takes d8"). Book, rock, brook or
+  ruk before a square means rook, and a jumble before a square is still a move, so Sonic should write the letter and
+  number it heard.
+- **Banter** (`banter.ts`): all of the user's lines stay. New lines: friendly jabs on blunders and gifts ("Ooh, a
+  present! You shouldn't have.", "Yoink! Sorry, I couldn't resist."), on odd moves ("You're full of surprises
+  today."), and a second queen gift line. Two new pools are used on quiet moves (60% chance), after the first three
+  moves of a game:
+  - `tease`: "I'm watching you!", "Bring it on!", "I'm not scared. Well, maybe a little.";
+  - `cheer`: "I like your style.", "This is a fun game!". Cheer is never used when the user is clearly losing.
+
+  Gaps are shorter: a blunder is jabbed at once, everything else waits one move (was 1 / 2 / 3).
+- **No unasked mate count** (`withoutCoaching`): `evaluation.mateIn` is dropped, and any "forced mate in N" text
+  becomes "you're clearly winning" (or "I'm clearly winning").
+- **Split moves** (`incompleteMove`, `askRestOfMove`, `joinSplitMove`): a piece, an optional "to" or "takes", an
+  optional file letter and no rank gets "Knight to h... which number?" or "Rook takes on which square?", with no
+  model call. The next turn is joined to it if it is a rank or a square ("four" → "knight h four"). A full move just
+  plays. The half is kept for one turn only (`session.partialMove`).
+
+**Checked:**
+
+| check | result | cost |
+|---|---|---|
+| rook ASR (synthetic) | 7/7 rook moves right; "queen d8" → "b eight" | ~$0.01 |
+| rival sim, 9 games (free) | she remarks on 58% of moves (was 32%), 0 coaching, 0 model calls, 12-14 words/reply | $0 |
+| chat eval | 0 re-asks, 0 coaching, 743 ms avg; 1 "repeated" sentence was an asked-for "say that again" | $0.019 |
+| game eval | no regression: 0 made-up claims, 0 unsaid engine moves, 732 ms avg | $0.013 |
+| Sonic harness (Indian-accent audio) | 10/10 word for word, 0 repeat calls; first sound 2.2 s avg (was 1.6 s) | $0.023 |
+| live `sonic-5`, typed | "knight f" → "Knight to f... which number?", "three" played Nf3; "I'm watching you!" after Bc4 | ~$0.01 |
+
+Tests: agent 88, server 175.
+
+**Still open:**
+- Real-mic rook recognition is untested. It needs the user's own voice saying "rook d8".
+- The silent stretches of 20-40 s, where Sonic gives no transcript.
+- On a speaker the page drops speech while she talks, so a split move's second half can still be lost (the user then
+  repeats the move).
+- "How am I doing?" said "a material balance of 7.62", an engine score read as material.
+
+**Cost of this phase:** about $0.08.

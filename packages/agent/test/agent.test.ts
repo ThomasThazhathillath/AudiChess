@@ -2,6 +2,9 @@ import type { ConverseCommandInput, ConverseCommandOutput } from "@aws-sdk/clien
 import { describe, expect, it } from "vitest";
 import {
   quickChat,
+  incompleteMove,
+  askRestOfMove,
+  joinSplitMove,
   withoutCoaching,
   cleanSpeech as cleanSpeechForTest,
   addressedToAlexa,
@@ -395,6 +398,47 @@ describe("Phase 5: lively, non-repeating conversation", () => {
     expect((await sessions.get("s-no-move"))!.pending).toBeUndefined();
   });
 
+  it("asks for the rest of a split move and joins the next turn to it", async () => {
+    // "knight h", then "four" (2026-10-23 real game): the first half got an 8 s list of knight moves.
+    const sessions = new MemorySessionStore();
+    await gameSession(sessions, "s-split");
+    const seen: Record<string, unknown>[] = [];
+    const tools: ChessTools = {
+      listTools: async () => MCP_TOOLS,
+      callTool: async (_n, args) => { seen.push(args); return { isError: false, data: { speech: "x", gameOver: false, yourMoveSpoken: "knight to h4", engineMoveSpoken: "bishop to f8", commentary: {} } }; },
+    };
+    const s = scriptedConverse([]);
+    const deps = { converse: s.converse, tools, sessions, modelId: "m" };
+    const first = await runTurn(deps, "s-split", "knight h");
+    expect(first.reply).toBe("Knight to h... which number?");
+    expect(seen).toHaveLength(0);
+    expect(s.calls).toHaveLength(0);
+    const second = await runTurn(deps, "s-split", "four");
+    expect(seen[0]).toMatchObject({ move: "knight h four" });
+    expect(second.reply).toMatch(/h4/);
+    expect((await sessions.get("s-split"))!.partialMove).toBeUndefined();
+    // A piece alone asks for the whole square; a full move after it just plays.
+    expect((await runTurn(deps, "s-split", "rook takes")).reply).toBe("Rook takes on which square?");
+    await runTurn(deps, "s-split", "rook takes d eight");
+    expect(seen[1]).toMatchObject({ move: "rook takes d eight" });
+  });
+
+  it("knows half a move from a whole one", () => {
+    const game = { sessionId: "x", gameId: "g", turns: [], updatedAt: "", expiresAt: 0 };
+    expect(incompleteMove("knight h", game)).toBe("knight h");
+    expect(incompleteMove("night to", game)).toBe("knight");
+    expect(incompleteMove("book takes", game)).toBe("rook takes");
+    expect(incompleteMove("knight h four", game)).toBeUndefined();
+    expect(incompleteMove("knight takes bishop", game)).toBeUndefined();
+    expect(incompleteMove("knight h", { ...game, gameId: undefined })).toBeUndefined();
+    expect(askRestOfMove("rook")).toBe("Rook to which square?");
+    expect(joinSplitMove("knight h", "four")).toBe("knight h four");
+    expect(joinSplitMove("knight", "h four")).toBe("knight h four");
+    expect(joinSplitMove("rook takes", "on d8")).toBe("rook takes d8");
+    expect(joinSplitMove("knight", "four")).toBeUndefined();
+    expect(joinSplitMove("knight h", "what's the score")).toBeUndefined();
+  });
+
   it("plays the likeliest reading when the same question would be asked twice", async () => {
     const sessions = new MemorySessionStore();
     await gameSession(sessions, "s-twice");
@@ -704,6 +748,16 @@ describe("Phase 6: background speech, speed and shorter answers", () => {
     expect(Object.keys(withoutCoaching(facts, "how am I doing?"))).toEqual(["evaluation"]);
     expect(withoutCoaching(facts, "what are you threatening?")).toHaveProperty("threat");
     expect(cleanSpeechForTest("Thanks! Let's keep the game going.")).toBe("Thanks!");
+  });
+
+  it("hides a forced mate's length from analysis nobody asked about", () => {
+    // "eight queen" (a garble) got "You have a forced mate in one" (2026-10-23 real game).
+    const facts = { evaluation: { says: "you have a forced mate in 1", pawns: 99, mateIn: 1 }, summary: "You have a forced mate in one. Your rook on g8 is the most active piece.", notes: ["mate in 2 for me"] };
+    const out = withoutCoaching(facts, "eight queen");
+    expect(JSON.stringify(out)).not.toMatch(/mate in|mateIn/i);
+    expect(out.evaluation).toEqual({ says: "you're clearly winning", pawns: 99 });
+    expect(out.summary).toBe("you're clearly winning. Your rook on g8 is the most active piece.");
+    expect(withoutCoaching({ evaluation: { says: "I have a forced mate in 3", pawns: -99, mateIn: -3 } }).evaluation).toEqual({ says: "I'm clearly winning", pawns: -99 });
   });
 
   it("starts the new game when the answer to her colour question follows a restart request", async () => {

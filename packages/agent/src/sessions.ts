@@ -29,6 +29,8 @@ export interface Session {
   banter?: BanterState;
   /** The last thing done was an undo: "what should I have played?" now means the best move here. */
   justUndid?: boolean;
+  /** The first half of a split move ("knight h"), finished by the next turn ("four"). */
+  partialMove?: string;
   turns: Turn[];
   updatedAt: string;
   expiresAt: number;

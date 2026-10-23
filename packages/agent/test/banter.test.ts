@@ -50,18 +50,14 @@ describe("pickBanter", () => {
     expect(lines.every((l) => [...TAUNTS.check, ...TAUNTS.checkAgain].includes(l))).toBe(true);
   });
 
-  it("spaces remarks out: a blunder waits one move, flavour lines three, the game's end never", () => {
+  it("spaces remarks out: a blunder is jabbed at once, other remarks wait one move, the game's end never", () => {
     let r = pickBanter(turn({}, { iGaveCheck: true }), undefined, "g", fixed(0));
     expect(r.banter).toBeDefined();
     r = pickBanter(turn({ quality: "blunder" }), r.state, "g", fixed(0));
-    expect(r.banter).toBeUndefined(); // right after a remark: even a blunder waits
-    r = pickBanter(turn({ quality: "blunder" }), r.state, "g", fixed(0));
-    expect(r.banter).toBeDefined();
-    r = pickBanter(turn({}), r.state, "g", fixed(0));
-    r = pickBanter(turn({}), r.state, "g", fixed(0));
-    expect(pickBanter(turn({}, { iGaveCheck: true }), r.state, "g", fixed(0)).banter).toBeUndefined(); // 2 quiet: not yet
-    r = pickBanter(turn({}), r.state, "g", fixed(0));
-    expect(pickBanter(turn({}, { iGaveCheck: true }), r.state, "g", fixed(0)).banter).toBeDefined(); // 3 quiet
+    expect(r.banter).toBeDefined(); // right after a remark: a blunder still gets its jab
+    expect(pickBanter(turn({}, { iGaveCheck: true }), r.state, "g", fixed(0)).banter).toBeUndefined(); // 0 quiet: not yet
+    r = pickBanter(turn({}), r.state, "g", fixed(0.99));
+    expect(pickBanter(turn({}, { iGaveCheck: true }), r.state, "g", fixed(0)).banter).toBeDefined(); // 1 quiet
     expect(pickBanter(turn({}, { winner: "me" }), { ...r.state, quiet: 0 }, "g", fixed(0)).banter).toBeDefined();
   });
 
@@ -77,10 +73,28 @@ describe("pickBanter", () => {
     expect(pickBanter(turn({ quality: "blunder" }), state, "g2", fixed(0)).state.used).toHaveLength(1);
   });
 
-  it("says nothing on a quiet move", () => {
-    const r = pickBanter(turn({ quality: "good" }), undefined, "g", fixed(0));
+  it("says a friendly word on a quiet move only now and then", () => {
+    const mid: BanterState = { gameId: "g", used: [], quiet: 3, moves: 10 };
+    const r = pickBanter(turn({ quality: "good" }), mid, "g", fixed(0.99));
     expect(r.banter).toBeUndefined();
     expect(r.state.quiet).toBe(4);
+    // The opening moves are announced plainly.
+    expect(pickBanter(turn({ quality: "good" }), undefined, "g", fixed(0)).banter).toBeUndefined();
+    const cheer = pickBanter(turn({ quality: "good" }), mid, "g", fixed(0)).banter!;
+    expect(has(PRAISE.cheer, cheer.line)).toBe(true);
+    // Losing badly: a friendly tease, never a cheer that sounds like a pat on the head.
+    const tease = pickBanter(turn({ quality: "good" }, { evalForYou: -250 }), mid, "g", fixed(0)).banter!;
+    expect(has(TAUNTS.tease, tease.line)).toBe(true);
+    // Not right after another remark.
+    expect(pickBanter(turn({ quality: "good" }), { ...mid, quiet: 0 }, "g", fixed(0)).banter).toBeUndefined();
+  });
+
+  it("keeps the user's jabs and adds friendly ones", () => {
+    expect(TAUNTS.odd).toContain("Are we playing chess or guessing?");
+    expect(TAUNTS.odd).toContain("That's certainly one way to play chess.");
+    expect(TAUNTS.giftQueen).toContain("Did your queen just give up?");
+    expect(TAUNTS.tease.length).toBeGreaterThanOrEqual(10);
+    expect(PRAISE.cheer.length).toBeGreaterThanOrEqual(10);
   });
 
   it("ends the game with a line for each result", () => {

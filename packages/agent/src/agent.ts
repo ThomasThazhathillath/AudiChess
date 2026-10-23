@@ -605,6 +605,46 @@ export function isFaintMove(heard: string[], session: Session): boolean {
 }
 const FAINT_REASK = ["Sorry, I didn't catch your move. Say it again?", "Say that move once more?"];
 
+// ---------- split moves: "knight h", then "four" (2026-10-23 real game) ----------
+
+const PIECE_NAME: Record<string, string> = { knight: "knight", night: "knight", nite: "knight", horse: "knight", bishop: "bishop", rook: "rook", rock: "rook", ruk: "rook", book: "rook", queen: "queen", king: "king", pawn: "pawn" };
+/** A piece, maybe "to" / "takes", maybe a file letter, and no rank: Sonic cut the move in two. */
+const PART_MOVE = /^(?:(?:play|move|my)\s+)*(knight|night|nite|horse|bishop|rook|rock|ruk|book|queen|king|pawn)(?:\s+(to|takes|take|captures|on))?(?:\s+([a-h]|aitch))?[\s.!?,]*$/i;
+/** The rest of a split move: a rank, or a whole square ("four", "h four", "on h4"). */
+const MOVE_REST = /^(?:(?:to|on|takes)\s+)?(?:([a-h]|aitch)\s*)?([1-8]|one|two|three|four|for|five|six|seven|eight)[\s.!?]*$/i;
+
+/** The first half of a split move, or undefined. Only mid-game, when she asked nothing. */
+export function incompleteMove(text: string, session: Session): string | undefined {
+  if (!session.gameId || session.gameOver || session.pending) return undefined;
+  const m = text.trim().match(PART_MOVE);
+  if (!m) return undefined;
+  const verb = /^(takes|take|captures)$/i.test(m[2] ?? "") ? "takes" : "";
+  const file = m[3] ? (m[3].toLowerCase() === "aitch" ? "h" : m[3].toLowerCase()) : "";
+  return [PIECE_NAME[m[1].toLowerCase()], verb, file].filter(Boolean).join(" ");
+}
+
+/** Her short question for the missing half: "Knight to which square?", "Knight to h... which number?". */
+export function askRestOfMove(partial: string): string {
+  const [piece, ...rest] = partial.split(" ");
+  const takes = rest[0] === "takes";
+  const file = rest.find((w) => /^[a-h]$/.test(w));
+  const Piece = capitalize(piece);
+  if (file) return `${Piece} ${takes ? "takes on" : "to"} ${file}... which number?`;
+  return `${Piece} ${takes ? "takes on" : "to"} which square?`;
+}
+
+/** The whole move when this turn finishes the split one ("four" after "knight h" → "knight h four"), or undefined. */
+export function joinSplitMove(partial: string | undefined, text: string): string | undefined {
+  if (!partial) return undefined;
+  const m = text.trim().match(MOVE_REST);
+  if (!m) return undefined;
+  const words = partial.split(" ");
+  const file = m[1] ? (m[1].toLowerCase() === "aitch" ? "h" : m[1].toLowerCase()) : words.find((w) => /^[a-h]$/.test(w));
+  if (!file) return undefined; // "knight" then "four": still no square
+  const rank = m[2].toLowerCase() === "for" ? "four" : m[2].toLowerCase();
+  return [...words.filter((w) => !/^[a-h]$/.test(w)), /^[1-8]$/.test(rank) ? `${file}${rank}` : `${file} ${rank}`].join(" ");
+}
+
 // ---------- quick conversation: no model, no board, instant (chat eval, 2026-10-23) ----------
 
 /** "Hmm, let me think", "wait", "one sec": they're thinking. It got a position analysis and a threat before. */
@@ -789,7 +829,24 @@ export function withoutCoaching(facts: Record<string, unknown>, userText = ""): 
   // speech is the tool's own summary, which names her threat ("I'm threatening pawn takes knight on f3", chat eval).
   const { bestMoves: _b, tactics: _t, myPiecesYouCanWin: _m, speech: _s, threat, yourPiecesUnderAttack, ...rest } = facts;
   // Her threat and what she attacks are warnings: only when they ask about her threats or plans.
-  return ASKS_HER_THREAT.test(userText) ? { ...rest, ...(threat !== undefined ? { threat } : {}), ...(yourPiecesUnderAttack !== undefined ? { yourPiecesUnderAttack } : {}) } : rest;
+  const kept = ASKS_HER_THREAT.test(userText) ? { ...rest, ...(threat !== undefined ? { threat } : {}), ...(yourPiecesUnderAttack !== undefined ? { yourPiecesUnderAttack } : {}) } : rest;
+  return withoutMateCount(kept) as Record<string, unknown>;
+}
+
+/**
+ * A forced mate's length is a hint too: a misheard "eight queen" got "You have a forced mate in one" (2026-10-23 real
+ * game). Unasked, it becomes "you're clearly winning" (or "I'm clearly winning" for hers).
+ */
+function withoutMateCount(v: unknown): unknown {
+  if (typeof v === "string") return v.replace(/\b(you|I) (?:have|has) a (?:forced )?mate in (?:\d+|one|two|three|four|five)\b/gi, (_, who: string) => (who.toLowerCase() === "you" ? "you're clearly winning" : "I'm clearly winning")).replace(/\b(?:forced )?mate in (?:\d+|one|two|three|four|five)\b/gi, "a winning position");
+  if (Array.isArray(v)) return v.map(withoutMateCount);
+  if (!v || typeof v !== "object") return v;
+  const o = v as Record<string, unknown>;
+  if (typeof o.mateIn === "number") {
+    const { mateIn, ...other } = o;
+    return { ...(withoutMateCount(other) as object), says: (mateIn as number) > 0 ? "you're clearly winning" : "I'm clearly winning" };
+  }
+  return Object.fromEntries(Object.entries(o).map(([k, x]) => [k, withoutMateCount(x)]));
 }
 
 const capitalize = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
@@ -872,13 +929,21 @@ export async function runTurn(deps: AgentDeps, sessionId: string, input: TurnInp
   const timings = { modelMs: 0, toolMs: 0, totalMs: 0, fastPath: false };
   const { text: rawIn, alternatives = [], chessHeard: rawChess, woken = true } = typeof input === "string" ? ({ text: input } as TurnInput) : input;
   const rawText = typeof rawIn === "string" ? rawIn : ""; // a request without text once crashed stripWakeWord
-  const userText = stripWakeWord(rawText) || rawText.trim();
-  const heard = [...new Set([userText, ...alternatives.map(stripWakeWord)].filter(Boolean))].slice(0, 5);
+  let userText = stripWakeWord(rawText) || rawText.trim();
+  let heard = [...new Set([userText, ...alternatives.map(stripWakeWord)].filter(Boolean))].slice(0, 5);
   // The chess-grammar reading ("pawn d four") is the most reliable for moves, so it leads what make_move gets.
   const chessHeard = rawChess ? stripWakeWord(rawChess) : "";
-  const moveHeard = chessHeard ? [...new Set([chessHeard, ...heard])].slice(0, 5) : heard;
+  let moveHeard = chessHeard ? [...new Set([chessHeard, ...heard])].slice(0, 5) : heard;
 
   let session = (await deps.sessions.get(sessionId)) ?? newSession(sessionId);
+  // "knight h", then "four": the second half finishes the first (Sonic cut the move in two). One turn only.
+  const joined = joinSplitMove(session.partialMove, userText);
+  if (session.partialMove) session = { ...session, partialMove: undefined };
+  if (joined) {
+    userText = joined;
+    heard = [joined];
+    moveHeard = [joined];
+  }
   const toolCalls: ToolTrace[] = [];
   const usage = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, rounds: 0 };
   const silent = (): TurnResult => ({
@@ -933,6 +998,11 @@ export async function runTurn(deps: AgentDeps, sessionId: string, input: TurnInp
     reply = "Okay, scrap that. Say your move again.";
   } else if (!userText && !chessHeard) {
     reply = "Sorry, I didn't catch that. Could you say it again?";
+  } else if (!joined && incompleteMove(userText, session) && !asksQuestion([...session.turns].reverse().find((t) => t.role === "assistant")?.text ?? "")) {
+    // Half a move: ask for the rest in a few words, no model (it once read out every knight move for 8 s).
+    const partial = incompleteMove(userText, session)!;
+    session = { ...session, partialMove: partial };
+    reply = askRestOfMove(partial);
   } else if (isFaintMove(moveHeard, session)) {
     // Also when "woken": the page sends everything as addressed to her since Sonic (2026-10-23).
     reply = FAINT_REASK[session.turns.length % FAINT_REASK.length];

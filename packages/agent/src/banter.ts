@@ -5,6 +5,10 @@
 // Part 2 = appreciations). Lines that claim something the server can't check (pins, outposts, the clock...) were
 // left out, and lines that claim a fact (a fork, a knight, a second check) sit in their own gated category.
 // To add lines, append them to a category.
+//
+// 2026-10-23 (Phase 10b, "make banter friendlier, more jabs... don't remove insults, I want more of all that"):
+// every line of the list stays. Unnumbered lines are new: friendly teasing and cheering. She speaks more often, and
+// also says one of them on a quiet move (`tease`, `cheer`).
 
 export const TAUNTS = {
   /** Your move lost 150+ cp. */
@@ -33,6 +37,11 @@ export const TAUNTS = {
     "Did you see what that move allowed?", // 72
     "Your defense has a hole in it.", // 73
     "That was a missed detail.", // 74
+    "Ooh, I'll happily take that chance!",
+    "Oops! Looks like my lucky day.",
+    "Don't worry, plenty of game left.",
+    "Hehe, I was hoping you'd do that.",
+    "Well, that just made my day!",
   ],
   /** She just won material you left. */
   gift: [
@@ -43,8 +52,11 @@ export const TAUNTS = {
     "That piece had better days.", // 69
     "You gave me exactly what I needed.", // 70
     "I'll gladly accept that mistake.", // 75
+    "Ooh, a present! You shouldn't have.",
+    "Thank you kindly! I'll look after it.",
+    "Yoink! Sorry, I couldn't resist.",
   ],
-  giftQueen: ["Did your queen just give up?"], // 7
+  giftQueen: ["Did your queen just give up?", "Your queen? Feeling generous today!"], // 7, new
   /** An inaccuracy (60-150 cp). */
   odd: [
     "I think your pieces are confused.", // 3
@@ -57,6 +69,9 @@ export const TAUNTS = {
     "That's a bold choice.", // 21
     "This board is getting entertaining.", // 24
     "I didn't know we were experimenting today.", // 25
+    "Ooh, unusual! I like it.",
+    "You're full of surprises today.",
+    "Now that's a move with personality.",
   ],
   oddKnight: ["Your knight took the scenic route."], // 22
   /** Her move gives check. */
@@ -169,6 +184,21 @@ export const TAUNTS = {
     "Can you hold the position together?", // 199
     "Let's see who finishes stronger.", // 200
   ],
+  /** Friendly teasing on a quiet move, now and then. Claims nothing about the position. */
+  tease: [
+    "I'm watching you!",
+    "Don't get too comfortable over there.",
+    "I'm just getting warmed up.",
+    "Hmm, what are you up to?",
+    "You're keeping me on my toes.",
+    "I've still got a few tricks left.",
+    "Bring it on!",
+    "Let's make this interesting.",
+    "You're trickier than you look.",
+    "Oh, you're making me work today.",
+    "I'm not scared. Well, maybe a little.",
+    "My pieces are plotting something. Probably.",
+  ],
 } as const;
 
 export const PRAISE = {
@@ -251,6 +281,19 @@ export const PRAISE = {
   endgame: ["Excellent endgame technique.", "That's a textbook endgame.", "You made every tempo count."], // 81, 85, 90
   endgameKing: ["Great king activity."], // 82
   endgameAhead: ["You converted the advantage well.", "You found the winning plan."], // 86, 88
+  /** Cheering on a quiet move, now and then, while the user isn't clearly losing. */
+  cheer: [
+    "Nice and steady.",
+    "I like your style.",
+    "This is a fun game!",
+    "Good thinking.",
+    "Ooh, solid.",
+    "I'm enjoying this one.",
+    "Love the confidence!",
+    "You're a pleasure to play against.",
+    "Good one. I'm thinking hard now.",
+    "Lovely. Keep them coming!",
+  ],
 } as const;
 
 export const ENDINGS = {
@@ -269,6 +312,8 @@ export interface BanterState {
   lastCheck?: boolean;
   /** "Welcome to the endgame" was already said. */
   endgame?: boolean;
+  /** User moves this game, so the opening moves are announced plainly. */
+  moves?: number;
 }
 
 export interface Banter {
@@ -281,10 +326,14 @@ export interface Banter {
 }
 /**
  * How many quiet moves (user moves without a remark) each kind of remark waits for. The first sim gave a remark on
- * half of all moves (2026-10-17, rival-sim): too much, so even a blunder waits one move after the last remark, and
- * flavour lines (a check, pressure, a piece's mood) wait three.
+ * half of all moves (2026-10-17, rival-sim), so the gaps were 1, 2 and 3 moves. 2026-10-23: the user wants more of
+ * it ("I want more of all that"): a blunder is jabbed at once, everything else waits one move.
  */
-const GAP = { end: 0, big: 1, mid: 2, minor: 3 } as const;
+const GAP = { end: 0, big: 0, mid: 1, minor: 1 } as const;
+/** The chance of a friendly tease or cheer on a move where nothing else happened. */
+const CHAT_CHANCE = 0.6;
+/** No friendly chatter on the first moves of a game: they are announced plainly. */
+const OPENING_MOVES = 3;
 type Tier = keyof typeof GAP;
 
 interface MoveResult {
@@ -364,6 +413,12 @@ function eventOf(r: MoveResult, state: BanterState, rng: () => number): Pick | u
     const own = f.myPiece === "knight" ? TAUNTS.knight : f.myPiece === "bishop" ? TAUNTS.bishop : f.myPiece === "rook" ? TAUNTS.rookMine : f.myPiece === "queen" ? TAUNTS.queenMine : undefined;
     return { tier: "minor", mood: "taunt", event: `your ${f.myPiece ?? "piece"} is active`, pools: own ? [own, TAUNTS.pieces] : [TAUNTS.pieces] };
   }
+  // Nothing happened: a friendly word now and then, so she sounds like company and not a move announcer.
+  if ((state.moves ?? 0) >= OPENING_MOVES && state.quiet >= GAP.minor && rng() < CHAT_CHANCE) {
+    const losing = (f.evalForYou ?? 0) <= -200 || (f.materialBalance ?? 0) <= -2;
+    if (!losing && rng() < 0.5) return { tier: "minor", mood: "praise", event: "a quiet move; cheer them on", pools: [PRAISE.cheer] };
+    return { tier: "minor", mood: "taunt", event: "a quiet move; tease them in a friendly way", pools: [TAUNTS.tease] };
+  }
   return undefined;
 }
 
@@ -376,6 +431,7 @@ export function pickBanter(result: Record<string, unknown>, prev: BanterState | 
   const f = r.moveFacts ?? {};
   const state: BanterState = prev && prev.gameId === gameId ? { ...prev, used: [...prev.used] } : { gameId, used: [], quiet: GAP.minor };
   const pick = eventOf(r, state, rng);
+  state.moves = (state.moves ?? 0) + 1;
   state.lastCheck = !!f.iGaveCheck;
   if (f.phase === "endgame") state.endgame = true; // announced at most once, and never late
   // Something happened but she spoke too recently: stay quiet (a smaller event never takes its place).
