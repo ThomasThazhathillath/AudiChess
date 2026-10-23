@@ -1014,3 +1014,30 @@ lock, one agent call per turn, transcript cleaning). `sam validate --lint` passe
 **Cost of this phase:** about $0.10 (4 harness runs $0.091, live browser check about $0.01).
 
 **Deployed 2026-10-23** (build `sonic-1`, https://d2ammv4cvnzsu5.cloudfront.net).
+
+### Phase 9b — first real-mic game with Sonic (2026-10-23)
+
+Sonic heard every phrase in the user's first real-mic game: "hey alexa, let's play chess", "let's start a new game",
+"white easy". Three things went wrong:
+- **Stuck in an old game.** The page reused the stored session, so "let's play chess" answered about a game from
+  days before, and "new game" was refused. **Now every page load is a new session**, so a refresh starts a new game.
+  The old game is left behind.
+- **"white easy" dropped as background talk.** Mid-game, "let's start a new game" got "White or black? …", but the
+  answer has no restart words. The guard refused `new_game`, and the model chose "ignore". The answer to her question
+  right after a restart request now counts as the restart (`answersRestart`, plus a unit test). Reproduced and fixed
+  against the local server.
+- **Sonic re-called the tool 8 times in 3 s** after those two dropped answers. Nothing was heard after that. The
+  harness, with an added background phrase, showed no loop (11/11 word for word, $0.024). As a safety net, a third
+  repeat call now opens a fresh stream.
+
+**Also new (build `sonic-2`):**
+- She counts as done talking by the wall clock, not the audio clock, so the mic can't stay shut.
+- The drawer shows "she spoke N s" after each reply, and every 10 s the mic level, the seconds sent, the seconds
+  sent as silence while she spoke, and the stream's age.
+- **Self-heal:** two 10 s windows with over a second of talking each, and nothing transcribed for 20 s, open a
+  fresh stream.
+
+**Checked live** (typed turns, no mic in the browser pane): a new session on load; "let's play chess", "white
+easy", "d4", then "let's start a new game", "white easy" started a new game; she spoke each reply (2.8–4.8 s).
+
+**Tests:** agent 80, page 59 + 17. **Cost:** about $0.03 (one harness run, the local repro, live check).

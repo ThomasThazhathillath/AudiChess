@@ -8,7 +8,7 @@
   const device = $("device"), live = $("live"), startEl = $("start"), startBtn = $("start-btn"), startNote = $("start-note");
   const debugEl = $("debug"), debugLog = $("debug-log");
 
-  const BUILD = "sonic-1"; // shown in the debug drawer, to confirm which code the browser runs
+  const BUILD = "sonic-2"; // shown in the debug drawer, to confirm which code the browser runs
 
   const params = new URLSearchParams(location.search);
   const LOCAL = /^(localhost|127\.0\.0\.1|\[::1\])$/.test(location.hostname);
@@ -26,8 +26,9 @@
     set(k, v) { try { localStorage.setItem(k, v); } catch { /* ignore */ } },
   };
   const newId = () => (crypto.randomUUID ? crypto.randomUUID() : `s-${Date.now()}-${Math.random().toString(36).slice(2)}`);
-  let sessionId = store.get("alexaChess.session", null) || newId();
-  store.set("alexaChess.session", sessionId);
+  // A new session on every page load, so a refresh starts a new game (the old one is left behind): reusing the stored
+  // session kept answering about an old game and refused "new game" (2026-10-23 live game).
+  let sessionId = newId();
 
   // ---------- state ----------
   let config = null;
@@ -175,9 +176,12 @@
 
   // ---------- Sonic's voice: 24 kHz PCM chunks, played back to back ----------
   let playHead = 0;          // outCtx time the queued audio ends
+  let speakEndAt = 0;        // the same moment by the wall clock: a suspended or late audio clock can't keep the mic shut
+  let speakTimer = null;
   let sources = [];
   let dropAudio = false;     // the agent said nothing: anything Sonic says anyway is not played
-  const isSpeaking = () => !!outCtx && outCtx.currentTime < playHead;
+  let turnAudioSec = 0;      // seconds of her voice this turn, for the drawer
+  const isSpeaking = () => Date.now() < speakEndAt;
 
   function playChunk(b64) {
     if (!outCtx || dropAudio || muted) return;
@@ -195,8 +199,12 @@
     const at = Math.max(outCtx.currentTime + 0.03, playHead);
     src.start(at);
     playHead = at + buf.duration;
+    speakEndAt = Date.now() + (playHead - outCtx.currentTime) * 1000;
+    turnAudioSec += buf.duration;
     sources.push(src);
-    src.onended = () => { sources = sources.filter((s) => s !== src); if (!isSpeaking()) speechDone(); };
+    src.onended = () => { sources = sources.filter((s) => s !== src); };
+    clearTimeout(speakTimer);
+    speakTimer = setTimeout(speechDone, speakEndAt - Date.now() + 20);
     setState("speaking");
   }
 
@@ -204,9 +212,12 @@
     for (const s of sources) { try { s.stop(); } catch { /* already done */ } }
     sources = [];
     if (outCtx) playHead = outCtx.currentTime;
+    speakEndAt = 0;
+    clearTimeout(speakTimer);
     speechDone();
   }
   function speechDone() {
+    if (turnAudioSec) { logNote(`she spoke ${turnAudioSec.toFixed(1)} s`); turnAudioSec = 0; }
     if (muted) return;
     if (device.dataset.state === "speaking") restState();
     maybeRenew();
@@ -254,6 +265,8 @@
   let openedAt = 0;
   let lastUserAt = 0;        // last time Sonic heard the user
   let renewAfterTurn = "";   // a reason to open a fresh stream once she has finished talking
+  let repeats = 0;           // Sonic's repeat tool calls since the user last spoke
+  let lastHeardAt = 0;       // last transcript from Sonic
   let retryMs = 1000;
   let usage = { speechIn: 0, speechOut: 0, textIn: 0, textOut: 0 };
   let usageBase = { speechIn: 0, speechOut: 0, textIn: 0, textOut: 0 }; // totals of the streams already closed
@@ -271,7 +284,9 @@
         const t = window.AlexaSonic.clean(text);
         if (!t) return;
         lastUserAt = Date.now();
+        lastHeardAt = Date.now();
         dropAudio = false;
+        repeats = 0;
         heardLog.push(t);
         DS?.hearing(t);
         logNote(`heard "${t}"`, "heard");
@@ -285,7 +300,13 @@
         if (!say) dropAudio = true;
         return say;
       },
-      onRepeatTool: (heard) => logNote(`Sonic asked again for "${heard}": not sent`),
+      // Sonic re-calling the tool for words already answered (8 times in 3 s after two dropped answers, 2026-10-23
+      // live game, and nothing was heard after that): from the third repeat a fresh stream is opened.
+      onRepeatTool: (heard) => {
+        repeats++;
+        if (repeats === 1) logNote(`Sonic asked again for "${heard}": not sent`);
+        if (repeats === 3) { renewAfterTurn = "Sonic kept repeating the tool call"; setTimeout(maybeRenew, 0); }
+      },
       onAudio: playChunk,
       onInterrupted: () => { logNote("interrupted: she stopped talking", "interrupt"); stopSpeaking(); },
       onTurnEnd: () => maybeRenew(),
@@ -362,14 +383,39 @@
     const node = new AudioWorkletNode(ctx, "mic");
     ctx.createMediaStreamSource(stream).connect(node);
     node.port.onmessage = (e) => {
+      let sum = 0, peak = 0;
+      for (let i = 0; i < e.data.length; i += 4) { const v = Math.abs(e.data[i]) / 0x8000; sum += v * v; if (v > peak) peak = v; }
+      const rms = Math.sqrt(sum / (e.data.length / 4));
+      DS?.level(rms);
+      mic.frames++; mic.sum += rms * rms; mic.peak = Math.max(mic.peak, peak);
       if (!sonic || muted) return;
       const speaking = isSpeaking();
       if (speaking) quietUntil = Date.now() + 400;
-      const frame = !BARGE_IN && (speaking || Date.now() < quietUntil) ? silence : e.data;
-      sonic.audio(frame);
-      if (DS) { let sum = 0; for (let i = 0; i < e.data.length; i += 8) sum += (e.data[i] / 0x8000) ** 2; DS.level(Math.sqrt(sum / (e.data.length / 8))); }
+      const gated = !BARGE_IN && (speaking || Date.now() < quietUntil);
+      if (gated) mic.gated++;
+      else if (rms > 0.03) mic.loud++; // about -30 dB: somebody talking near the mic (not her, she is gated)
+      sonic.audio(gated ? silence : e.data);
     };
+    logNote(`mic: ${stream.getAudioTracks()[0]?.label || "default"} at ${ctx.sampleRate} Hz (${ctx.state})`);
   }
+
+  // Every 10 s in the drawer: is the mic sending sound, and how much of it went to Sonic as silence while she talked.
+  // A deaf spell can then be read from the log (2026-10-23: nothing after the first "hello", and no way to tell why).
+  const mic = { frames: 0, sum: 0, peak: 0, gated: 0, loud: 0, loudWindows: 0 };
+  const db = (x) => (x > 0 ? Math.round(20 * Math.log10(x)) : -99);
+  setInterval(() => {
+    if (!started || muted || !mic.frames) return;
+    logNote(`mic: level avg ${db(Math.sqrt(mic.sum / mic.frames))} dB, peak ${db(mic.peak)} dB · ${Math.round((mic.frames * FRAME) / 16000)} s sent${mic.gated ? `, ${Math.round((mic.gated * FRAME) / 16000)} s as silence while she spoke` : ""}${sonic ? ` · stream ${Math.round((Date.now() - openedAt) / 1000)} s old` : " · no stream"}`);
+    // Two 10 s windows in a row with over a second of talking each, and Sonic transcribed nothing for 20 s: the stream
+    // has gone deaf, so a fresh one is opened.
+    mic.loudWindows = (mic.loud * FRAME) / 16000 >= 1 ? mic.loudWindows + 1 : 0;
+    if (sonic && mic.loudWindows >= 2 && Date.now() - Math.max(lastHeardAt, openedAt) > 20000 && !busy && !isSpeaking()) {
+      mic.loudWindows = 0;
+      renewAfterTurn = "talking at the mic but nothing heard for 20 s";
+      maybeRenew();
+    }
+    Object.assign(mic, { frames: 0, sum: 0, peak: 0, gated: 0, loud: 0 });
+  }, 10000);
 
   // Nobody spoke for 5 minutes: close the stream (an open mic costs money on Sonic), tap to come back.
   setInterval(() => {
@@ -452,7 +498,6 @@
   });
   $("new-session").addEventListener("click", () => {
     sessionId = newId();
-    store.set("alexaChess.session", sessionId);
     debugLog.innerHTML = "";
     live.textContent = "New session";
   });

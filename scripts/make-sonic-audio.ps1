@@ -14,6 +14,7 @@ $phrases = @(
   "easy",
   "e4",
   "knight f3",
+  "so the meeting is on tuesday then, after lunch",
   "what was your last move?",
   "bishop c4",
   "who's winning?",

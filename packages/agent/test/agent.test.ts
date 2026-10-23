@@ -653,6 +653,20 @@ describe("Phase 6: background speech, speed and shorter answers", () => {
     expect(calls).toHaveLength(1);
   });
 
+  it("starts the new game when the answer to her colour question follows a restart request", async () => {
+    // 2026-10-23 live game: "let's start a new game" -> "White or black?..." -> "white easy" was dropped as background.
+    const sessions = new MemorySessionStore();
+    await gameSession(sessions, "s-restart-2");
+    const { tools, calls } = fakeTools();
+    const s = scriptedConverse([use("new_game", {}), say("Sure! White or black? And easy, medium or hard?")]);
+    await runTurn({ converse: s.converse, tools, sessions, modelId: "m" }, "s-restart-2", { text: "let's start a new game", woken: false });
+    expect(calls).toHaveLength(0);
+    const s2 = scriptedConverse([use("new_game", { color: "white", level: 2 }), say("Fresh board!")]);
+    const r = await runTurn({ converse: s2.converse, tools, sessions, modelId: "m" }, "s-restart-2", { text: "white easy", woken: false });
+    expect(r.ignored).toBeFalsy();
+    expect(calls.map((c) => c.name)).toEqual(["new_game"]);
+  });
+
   it("builds move replies without the model: moves first, then one jab, compliment or opening", () => {
     const base = { yourMoveSpoken: "knight to f3", engineMoveSpoken: "pawn to d5" };
     expect(quickMoveReply({ ...base, commentary: {} }, "brief", 0)).toBe("Knight to f3. I play pawn to d5.");

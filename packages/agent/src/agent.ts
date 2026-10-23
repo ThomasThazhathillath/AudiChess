@@ -710,6 +710,15 @@ export async function guessLegalMove(
 /** A restart mid-game needs the words for it: a stray "correct" once started a new game over a game in progress. */
 const RESTART_WORDS = /\b(new game|start (?:over|again|afresh)|restart|rematch|play again|another game|fresh game|reset|from the (?:start|beginning)|start a new)\b/i;
 
+/**
+ * The answer to her "White or black? And easy, medium or hard?" right after the user asked for a new game: "white
+ * easy" has no restart words of its own, but it is that restart (dropped as background talk, 2026-10-23 live game).
+ */
+function answersRestart(session: Session): boolean {
+  const [user, assistant] = [...session.turns].slice(-2);
+  return user?.role === "user" && RESTART_WORDS.test(user.text) && assistant?.role === "assistant" && asksQuestion(assistant.text);
+}
+
 const capitalize = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
 
 /**
@@ -906,7 +915,7 @@ export async function runTurn(deps: AgentDeps, sessionId: string, input: TurnInp
       else if (name === "make_move" && session.confirmMoves) args.preview = true;
 
       const missing = name === "new_game" ? missingGameChoices(session, userText) : [];
-      const restartMidGame = name === "new_game" && !!session.gameId && !session.gameOver && !RESTART_WORDS.test(heard.join(" "));
+      const restartMidGame = name === "new_game" && !!session.gameId && !session.gameOver && !RESTART_WORDS.test(heard.join(" ")) && !answersRestart(session);
       // Game-ending and history-changing tools need the words for it: in the eval "Can I resign?" resigned the game
       // and "Can you redo the move?" took a move back.
       const unsureResign = name === "resign" && !RESIGN_WORDS.test(userText);
