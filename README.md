@@ -1,5 +1,8 @@
 # AudiChess: Alexa+ blind chess
 
+Play chess with your eyes closed: a voice-only rival that tells you the board, answers any question about it and
+trash-talks back.
+
 **Play chess by voice with Alexa, with no board.** AudiChess is the web front end. Behind it are the `alexa_chess`
 MCP server and the agent. You talk, she listens, plays back against you with a real chess
 engine, chats like a friendly rival, and answers anything about the game, because you can't see the board.
