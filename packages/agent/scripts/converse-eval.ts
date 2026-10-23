@@ -5,7 +5,7 @@ import type { ToolTrace, TurnResult } from "../src/agent.js";
 import type { ChessTools } from "../src/mcpClient.js";
 
 // Conversation-quality eval: one scripted ~25-turn game through runTurn, then metrics on the replies.
-//   (packages/mcp-server: npm run dev)   then   npm run eval -- [--model <bedrock id>] [--label <name>]
+//   (packages/mcp-server: npm run dev)   then   npm run eval -- [--model <bedrock id>] [--label <name>] [--script chat]
 // Results go to eval-results/<timestamp>-<label>.json (gitignored) so before/after runs can be diffed.
 
 // ---------- the script ----------
@@ -41,6 +41,59 @@ export const SCRIPT = [
   "I resign",
   "how could I have played better",
 ];
+
+/**
+ * Conversation as people actually talk to her by voice (Nova 2 Sonic, 2026-10-23): small talk, comments, trash talk,
+ * thanks, off-topic questions and a goodbye around a short game. "--script chat".
+ */
+export const CHAT_SCRIPT = [
+  "hello",
+  "how are you?",
+  "what's your name?",
+  "let's play chess",
+  "I'll be white, make it easy",
+  "@move",
+  "nice move",
+  "@move",
+  "you're going down",
+  "@move",
+  "this is fun",
+  "what did you just play?",
+  "why did you play that?",
+  "@move",
+  "hmm, let me think",
+  "okay",
+  "@move",
+  "tell me a joke",
+  "what's the weather like?",
+  "@move",
+  "can you say that again?",
+  "@blunder",
+  "oops",
+  "how am I doing?",
+  "thank you",
+  "@move",
+  "what's your rating?",
+  "you're pretty good",
+  "@move",
+  "I have to go now, bye",
+];
+
+/** Replies to these are chat: they should never re-ask, coach, or analyse. */
+export const CHAT_LINES = /^(hello|how are you\?|what's your name\?|nice move|you're going down|this is fun|hmm, let me think|okay|tell me a joke|oops|thank you|you're pretty good|I have to go now, bye)$/i;
+const REASK = /\b(didn'?t (?:quite )?(?:catch|get|hear|understand)|say (?:it|that) again|could you repeat|come again|pardon)\b/i;
+const COACHING = /\b(best move|you (?:should|could|might want to)|careful|watch out|threat\w*|consider playing|the engine)\b/i;
+
+/** Whole sentences said more than once across replies (moves and squares count as the same word). */
+export function repeatedSentences(replies: string[]): { sentence: string; replies: number }[] {
+  const seen = new Map<string, number>();
+  for (const r of replies) {
+    for (const s of new Set(sentences(r).map((x) => words(x).map((w) => (MOVE_TOKEN.test(w) || /^[a-h][1-8]$/.test(w) ? "<sq>" : w)).join(" ")))) {
+      if (s.split(" ").length >= 3 && !/<sq>|^(you play|i play|this is the)/.test(s)) seen.set(s, (seen.get(s) ?? 0) + 1);
+    }
+  }
+  return [...seen].filter(([, c]) => c > 1).map(([sentence, c]) => ({ sentence, replies: c })).sort((a, b) => b.replies - a.replies);
+}
 
 export interface Candidate {
   say: string;
@@ -184,7 +237,7 @@ export function repeatedFirstWords(replies: string[]): { word: string; replies: 
 }
 
 const MOVE_CLAIM = /\b(you played|I play|I['’]ll play|I respond)\b/i;
-const GROUNDING_TOOLS = ["make_move", "new_game"];
+const GROUNDING_TOOLS = ["make_move", "new_game", "repeat_last", "last_moves"]; // the last two say earlier, grounded moves again
 
 /** A reply that announces moves although no move was made this turn (no successful make_move / new_game). */
 export function isMadeUpClaim(reply: string, toolCalls: Pick<ToolTrace, "name" | "isError">[], groundingTools = GROUNDING_TOOLS): boolean {
@@ -266,10 +319,18 @@ export function computeMetrics(turns: EvalTurn[], modelId: string) {
   );
   const cost = estimateCost(tokens, PRICES[modelId]);
   const handbacks = replies.filter(endsWithHandback).length;
+  const chat = answered.filter((t) => CHAT_LINES.test(t.user));
+  const chatReasks = chat.filter((t) => REASK.test(t.reply)).map((t) => ({ user: t.user, reply: t.reply }));
+  const chatCoaching = chat.filter((t) => COACHING.test(t.reply)).map((t) => ({ user: t.user, reply: t.reply }));
+  const repeatedWhole = repeatedSentences(replies);
   return {
     turns: turns.length,
     failedTurns: turns.length - answered.length,
     repeatedPhrases: { count: phrases.length, examples: phrases.slice(0, 15) },
+    chatTurns: chat.length,
+    chatReasks: { count: chatReasks.length, list: chatReasks },
+    chatCoaching: { count: chatCoaching.length, list: chatCoaching },
+    repeatedSentences: { count: repeatedWhole.length, list: repeatedWhole.slice(0, 10) },
     handbackEndingPct: replies.length ? round((100 * handbacks) / replies.length, 1) : 0,
     avgSentencesPerReply: round(avg(sentenceCounts)),
     avgWordsPerReply: round(avg(wordCounts), 1),
@@ -291,6 +352,10 @@ export function formatMetrics(m: Metrics): string {
     `turns: ${m.turns}${m.failedTurns ? ` (${m.failedTurns} failed)` : ""}`,
     `repeated 3-word phrases: ${m.repeatedPhrases.count}  e.g. ${m.repeatedPhrases.examples.slice(0, 8).map((p) => `"${p.phrase}"×${p.replies}`).join(", ") || "-"}`,
     `ends with "your move/turn/over to you": ${m.handbackEndingPct}%`,
+    `chat turns: ${m.chatTurns} · re-asked: ${m.chatReasks.count}${m.chatReasks.list.map((c) => `
+   "${c.user}" -> ${c.reply}`).join("")} · coaching: ${m.chatCoaching.count}${m.chatCoaching.list.map((c) => `
+   "${c.user}" -> ${c.reply}`).join("")}`,
+    `sentences said more than once: ${m.repeatedSentences.count}  ${m.repeatedSentences.list.map((x) => `"${x.sentence}"×${x.replies}`).join(", ")}`,
     `avg per reply: ${m.avgSentencesPerReply} sentences, ${m.avgWordsPerReply} words`,
     `repeated first words: ${m.repeatedFirstWords.map((w) => `${w.word}×${w.replies}`).join(", ") || "-"}`,
     `tool errors: ${m.toolErrors.count}${m.toolErrors.list.map((e) => `\n   #${e.turn} ${e.tool} ${JSON.stringify(e.args)}: ${e.speech ?? ""}`).join("")}`,
@@ -346,7 +411,8 @@ async function main() {
   const turns: EvalTurn[] = [];
   const queue = structuredClone(OPENING);
   let lastEngineMove: string | undefined;
-  for (const [i, step] of SCRIPT.entries()) {
+  const script = arg("script") === "chat" ? CHAT_SCRIPT : SCRIPT;
+  for (const [i, step] of script.entries()) {
     let line = step;
     let planned: string[] | undefined;
     if (step === "@move" || step === "@blunder") {
@@ -393,7 +459,7 @@ async function main() {
   writeFileSync(join(dir, ".gitignore"), "*\n");
   const stamp = startedAt.toISOString().replace(/[:.]/g, "-");
   const file = join(dir, `${stamp}-${label.replace(/[^\w.-]+/g, "_")}.json`);
-  writeFileSync(file, JSON.stringify({ label, modelId, mcpUrl, startedAt: startedAt.toISOString(), script: SCRIPT, turns, metrics }, null, 2));
+  writeFileSync(file, JSON.stringify({ label, modelId, mcpUrl, startedAt: startedAt.toISOString(), script, turns, metrics }, null, 2));
   console.log(`\n💾 ${file}`);
 }
 

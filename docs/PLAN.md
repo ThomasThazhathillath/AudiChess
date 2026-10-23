@@ -1113,3 +1113,69 @@ A real-model check of the first fix found two more problems:
 - Tests: agent 81 (new: the model never sees the user's best moves in unasked analysis).
 
 **Still to improve:** the banter repeats a little ("…let's keep playing" twice in a row). **Cost:** under $0.01.
+
+## Phase 10 — conversation (2026-10-23)
+
+The user asked to "improve every possible thing when it comes to conversation".
+
+**New eval:** `npm run eval -- --script chat`. 30 turns of how people actually talk to her: greeting before a game,
+"how are you", her name, compliments, trash talk, "hmm, let me think", "okay", a joke, the weather, "say that again",
+"oops" after a blunder, thanks, her rating, goodbye. New metrics:
+- re-asks on clearly spoken chat;
+- coaching words in chat replies;
+- whole sentences said more than once.
+
+| round | change | coaching in chat | repeated sentences | words / reply | avg latency | cost |
+|---|---|---|---|---|---|---|
+| baseline | — | 2 | 3 (×8 in all) | 11.5 | 890 ms | $0.021 |
+| 2 | quick chat, undo guard, Conversation section | 0 | 1 | 9.8 | 777 ms | $0.019 |
+| 3 | examples removed (bland, "just a playful jab") | 0 | 0 | — | — | ~$0.02 |
+| 4 | examples back, 12-reply memory, refusal retry only for chess | 0 | 0 | 9.8 | 753 ms | $0.020 |
+| 5 | threat summary hidden (+ game eval: no regression) | 0 | 1 ("let's keep the game going" ×3) | 11.2 | 747 ms | $0.019 + $0.013 |
+| 6 | filler closer stripped, greeting | 0 | 0 | 9.7 | 634 ms | $0.017 |
+| 7 | no rule talk | 0 | 0 | 10.9 | 700 ms | $0.020 |
+
+**What was wrong at the baseline:**
+- "Just the moves, please!" ×4: to a joke, the weather, thanks and a compliment.
+- "Hmm, let me think" and "okay" got a position analysis with a threat.
+- "Oops" took the move back unasked.
+- "You're going down" got analysis.
+- "Nice move" got "Nice one! But let's keep playing."
+- "How am I doing?" added her threat and the pieces under attack.
+
+**Changed (agent):**
+- **Instant replies with no model** (`quickChat`), varied and never the same as one of her last six replies:
+  - thinking ("hmm, let me think", "wait", "one sec") → "Take your time." etc.;
+  - a bare "okay" / "alright" mid-game, when she asked nothing → "Your move whenever you're ready." etc.;
+  - "oops" / "oh no" after a move → "Want to take that back? Just say undo.";
+  - enjoyment ("this is fun", "I love this", "great game") → "Glad you're enjoying it! Me too." etc. Nova 2 Lite
+    answered it with a game status or with rules talk.
+- **Undo needs undo words**, or a yes to her take-back offer.
+- **Analysis nobody asked about** loses her threat, the attacked pieces and the tool's own summary sentence too.
+  Those come back only for questions about her threats or plans.
+- **"Why did you play that?"** with no ideas in the facts: a quiet move, no invented plan.
+- **The refusal retry is only for chess questions.** "I can't tell you the weather" stays as it is.
+- **The variety memory covers the last 12 replies** (was 6).
+- The small-talk closer "Let's keep the game going." is stripped, like "Your move."
+- **The faint-move re-ask works again.** It was off since the page started sending every turn as addressed to her.
+- **Skill: a Conversation section**, covering compliments, trash talk, jokes, off-topic, thanks, how are you / name,
+  goodbye. It also says never to repeat a line, never to describe a reply, and never to talk about her rules.
+  Examples are marked "spirit only", because Nova copies an example word for word ("Flattery won't save your king,
+  though" twice).
+
+**Changed (page, build `sonic-4`):** she greets first. On Start a "hello" goes through Sonic, so she says "Hi there!
+Ready to play some blind chess?" instead of waiting in silence.
+
+**Checked:**
+- Sonic harness on the Indian-accent audio: 10/10 word for word, first sound 1.6 s on average, $0.023.
+- Original game eval: no regression (0 made-up claims, 0 engine moves left unsaid, 642 ms average).
+- Live (typed): greeting, game start, e4, "this is fun", "hmm, let me think", a joke, goodbye, all spoken.
+- Tests: agent 84 (quick chat, undo guard, no warnings in unasked analysis, closer stripping, enjoyment), page
+  59 + 30.
+
+**Still open:**
+- The joke repeats across sessions: the variety memory is per session.
+- Voice barge-in is still tap-only on speakers.
+
+**Cost of this phase:** about $0.22: 7 chat evals $0.14, 1 game eval $0.013, the Sonic harness $0.023, the local
+checks and the live check about $0.04.

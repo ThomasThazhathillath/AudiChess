@@ -196,7 +196,7 @@ const CHATTINESS_RULES: Record<Chattiness, string> = {
  * What Alexa said lately that she must not say again: how replies started, how they ended, and any phrase of
  * four or more words used twice. Fed into the prompt so variety is enforced, not just requested.
  */
-export function recentPhrases(turns: Session["turns"], lookback = 6): string[] {
+export function recentPhrases(turns: Session["turns"], lookback = 12): string[] {
   const replies = turns.filter((t) => t.role === "assistant").slice(-lookback).map((t) => t.text);
   const out = new Set<string>();
   const words = (s: string) => s.toLowerCase().replace(/[^a-z0-9' ]+/g, " ").split(/\s+/).filter(Boolean);
@@ -319,6 +319,12 @@ export function dropRepeatedSentences(reply: string, recentReplies: string[], ke
  */
 export function factsForModel(name: string, content: Record<string, unknown>, isError: boolean, chattiness: Chattiness, seed = 0, banter?: Banter): Record<string, unknown> {
   const { gameId: _g, fen: _f, ...rest } = content;
+  // "Why did you play that?" with no ideas for her move got a made-up plan ("prepare a kingside attack", chat eval
+  // 2026-10-23): with nothing in the facts it was a quiet move, and she says so.
+  const mine = rest.myLastMove as { ideas?: unknown[] } | undefined;
+  if (name === "review_game" && !isError && mine && Array.isArray(mine.ideas) && mine.ideas.length === 0) {
+    return { ...rest, note: "myLastMove has no special idea in the facts: if they ask why you played it, say it was a quiet, useful move (a playful line is fine) and invent no plan or attack." };
+  }
   if (isError || !FACT_TOOLS.has(name) || content.needsConfirmation) return rest;
   const { speech: _s, yourMove: _y, engineMove: _e, moveFacts: _m, ...facts } = rest;
   if (name === "new_game") {
@@ -395,6 +401,8 @@ const HAND_OVER = new RegExp(
     String.raw`|(?:so,? )?what(?:'s| is) your (?:next )?(?:move|plan)\?` +
     String.raw`|(?:(?:so|and|now)[,\s]+)?(?:(?:it'?s )?your (?:move|turn)|over to you)\s*[—–-]+\s*(?:what(?:'s| is) (?:next|your (?:next )?(?:move|plan))|what now|what will you (?:play|do))\?` +
     String.raw`|(?:(?:so|and|now)[,\s]+)?what(?:'s| is) next\?` +
+    // The filler closer of small talk ("Thanks! Let's keep the game going." three times in one chat eval).
+    String.raw`|(?:(?:but|so|now)[,\s]+)?let'?s (?:keep (?:the game |it |on )?(?:going|playing|rolling)|get back to (?:the game|it|chess))[.!]*` +
     String.raw`)$`,
   "i",
 );
@@ -597,6 +605,49 @@ export function isFaintMove(heard: string[], session: Session): boolean {
 }
 const FAINT_REASK = ["Sorry, I didn't catch your move. Say it again?", "Say that move once more?"];
 
+// ---------- quick conversation: no model, no board, instant (chat eval, 2026-10-23) ----------
+
+/** "Hmm, let me think", "wait", "one sec": they're thinking. It got a position analysis and a threat before. */
+const THINKING = /^(?:(?:hmm+|umm*|uh+|ok(?:ay)?|so|well)[\s,.]*)*(?:let me think|let me see|i'?m thinking|thinking|wait|hold on|one (?:sec(?:ond)?|moment|minute)|give me a (?:sec(?:ond)?|moment|minute)|just a (?:sec(?:ond)?|moment|minute)|hmm+|umm*)(?: about (?:it|this|that))?[\s.!]*$/i;
+const THINKING_REPLIES = ["Take your time.", "No rush, I'll wait.", "Sure, think it over.", "Take all the time you need.", "Go ahead, I'm not going anywhere."];
+/** A bare "okay" / "alright" / "cool" when she asked nothing: it got a full analysis twice in the chat eval. */
+const ACK = /^(?:ok(?:ay)?|alright|all right|right|cool|fine|got it|i see|sure|nice|great|good|hmm+ ?ok(?:ay)?)[\s.!]*$/i;
+const ACK_REPLIES = ["Your move whenever you're ready.", "Over to you.", "Ready when you are.", "Whenever you're ready.", "Your move."];
+/** "Oops" right after their move: offer the take-back; "oops" alone once took the move back unasked. */
+const OOPS = /^(?:oh,? )?(?:oops+|whoops+|oh no|uh oh|damn|dang|shoot|oh (?:god|man|dear)|that was a mistake|my mistake|i messed up|i blundered)[\s.!]*$/i;
+const OOPS_REPLIES = ["Want to take that back? Just say undo.", "Second thoughts? Say undo to take it back.", "Say undo if you'd like that one back."];
+
+/** "This is fun", "I love this", "great game": Nova 2 Lite answered with a game status or rules talk (chat eval). */
+const ENJOY = /^(?:(?:wow|oh|man|honestly|okay|ok|well)[\s,]+)*(?:this is (?:so |really |a lot of )?(?:fun|great|awesome|cool|exciting|enjoyable)|(?:i'?m|i am) (?:having (?:so much |a lot of )?fun|enjoying (?:this|it|the game))|i (?:really )?(?:love|like) (?:this|it|chess|this game|playing with you)|(?:what a |such a )?(?:fun|great|good|exciting) game(?: so far)?)[\s.!]*$/i;
+const ENJOY_REPLIES = ["Glad you're enjoying it! Me too.", "Me too! This one's getting interesting.", "Same here, you're good company.", "Isn't it? I'm having a blast too.", "Happy to hear it! Let's make it a good one."];
+
+/** The variant she hasn't said in her last few replies, so quick replies don't repeat. */
+function fresh(options: string[], session: Session): string {
+  const recent = new Set(session.turns.filter((t) => t.role === "assistant").slice(-6).map((t) => t.text));
+  return options.find((o) => !recent.has(o)) ?? options[session.turns.length % options.length];
+}
+
+/** An instant reply for thinking noises, a bare acknowledgement and "oops"; undefined when the model is needed. */
+export function quickChat(text: string, session: Session): string | undefined {
+  const t = text.trim();
+  const inGame = !!session.gameId && !session.gameOver;
+  const lastReply = [...session.turns].reverse().find((x) => x.role === "assistant")?.text ?? "";
+  if (session.pending || asksQuestion(lastReply)) return undefined; // "okay" / "sure" may be the answer to her question
+  if (THINKING.test(t)) return fresh(THINKING_REPLIES, session);
+  if (ENJOY.test(t)) return fresh(ENJOY_REPLIES, session);
+  if (inGame && ACK.test(t)) return fresh(ACK_REPLIES, session);
+  if (inGame && OOPS.test(t) && session.turns.length > 0) return fresh(OOPS_REPLIES, session);
+  return undefined;
+}
+
+/** Words that ask for a take-back, or a yes right after she offered one. Anything else must not undo a move. */
+const UNDO_WORDS = /\b(?:undo|take (?:it|that|this|my move|the move)? ?back|takeback|take-back|go back|revert|cancel (?:that|my) move)\b/i;
+function wantsUndo(text: string, session: Session): boolean {
+  if (UNDO_WORDS.test(text)) return true;
+  const lastReply = [...session.turns].reverse().find((x) => x.role === "assistant")?.text ?? "";
+  return /\b(take (?:that|it) back|say undo)\b/i.test(lastReply) && /^(?:yes|yeah|yep|yup|sure|ok(?:ay)?|please|do it|go ahead)\b/i.test(text.trim());
+}
+
 // ---------- question router: the common questions skip the model's tool choice ----------
 
 const NUMBER_WORDS: Record<string, number> = { two: 2, three: 3, "2": 2, "3": 3, several: 3, top: 3, few: 3, some: 3 };
@@ -735,8 +786,10 @@ const ASKS_HER_THREAT = /\b(?:threat\w*|plan\w*|up to|going to (?:play|do)|attac
  * about it ("My knight to f6 is a threat" answered "nice one" in the same check): an unasked warning is coaching too.
  */
 export function withoutCoaching(facts: Record<string, unknown>, userText = ""): Record<string, unknown> {
-  const { bestMoves: _b, tactics: _t, myPiecesYouCanWin: _m, threat, ...rest } = facts;
-  return ASKS_HER_THREAT.test(userText) && threat !== undefined ? { ...rest, threat } : rest;
+  // speech is the tool's own summary, which names her threat ("I'm threatening pawn takes knight on f3", chat eval).
+  const { bestMoves: _b, tactics: _t, myPiecesYouCanWin: _m, speech: _s, threat, yourPiecesUnderAttack, ...rest } = facts;
+  // Her threat and what she attacks are warnings: only when they ask about her threats or plans.
+  return ASKS_HER_THREAT.test(userText) ? { ...rest, ...(threat !== undefined ? { threat } : {}), ...(yourPiecesUnderAttack !== undefined ? { yourPiecesUnderAttack } : {}) } : rest;
 }
 
 const capitalize = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
@@ -880,8 +933,11 @@ export async function runTurn(deps: AgentDeps, sessionId: string, input: TurnInp
     reply = "Okay, scrap that. Say your move again.";
   } else if (!userText && !chessHeard) {
     reply = "Sorry, I didn't catch that. Could you say it again?";
-  } else if (!woken && isFaintMove(moveHeard, session)) {
+  } else if (isFaintMove(moveHeard, session)) {
+    // Also when "woken": the page sends everything as addressed to her since Sonic (2026-10-23).
     reply = FAINT_REASK[session.turns.length % FAINT_REASK.length];
+  } else {
+    reply = quickChat(userText, session) ?? "";
   }
   let repeated = false;
   let ignored = false;
@@ -939,10 +995,16 @@ export async function runTurn(deps: AgentDeps, sessionId: string, input: TurnInp
       // Game-ending and history-changing tools need the words for it: in the eval "Can I resign?" resigned the game
       // and "Can you redo the move?" took a move back.
       const unsureResign = name === "resign" && !RESIGN_WORDS.test(userText);
+      const unaskedUndo = name === "undo" && !wantsUndo(userText, session);
       const wrongUndo = name === "undo" && /\bredo\b/i.test(userText);
       if (unsureResign) {
         isError = true;
         askChoices = "Do you want to resign this game? Say \"I resign\" to confirm.";
+        content = { speech: askChoices };
+      } else if (unaskedUndo) {
+        // "Oops" once took a move back unasked (chat eval, 2026-10-23): offer it instead.
+        isError = true;
+        askChoices = "Want to take that move back? Just say undo.";
         content = { speech: askChoices };
       } else if (wrongUndo) {
         isError = true;
@@ -1187,7 +1249,9 @@ export async function runTurn(deps: AgentDeps, sessionId: string, input: TurnInp
   }
 
   // One more round when the model refused a chess question it had the facts for (at most once, about a second).
-  if (reply && REFUSAL.test(reply) && toolCalls.some((t) => !t.isError) && usage.rounds > 0) {
+  // Only for chess questions: "I can't tell you the weather" is a fine answer to small talk, and the
+  // retry once turned it into "I can't spot that from here…" (chat eval, 2026-10-23).
+  if (reply && REFUSAL.test(reply) && toolCalls.some((t) => !t.isError) && CHESS_WORDS.test(userText) && usage.rounds > 0) {
     const t = Date.now();
     const res = await deps.converse({
       modelId: deps.modelId,

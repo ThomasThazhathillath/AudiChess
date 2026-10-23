@@ -8,7 +8,7 @@
   const device = $("device"), live = $("live"), startEl = $("start"), startBtn = $("start-btn"), startNote = $("start-note");
   const debugEl = $("debug"), debugLog = $("debug-log");
 
-  const BUILD = "sonic-3"; // shown in the debug drawer, to confirm which code the browser runs
+  const BUILD = "sonic-4"; // shown in the debug drawer, to confirm which code the browser runs
 
   const params = new URLSearchParams(location.search);
   const LOCAL = /^(localhost|127\.0\.0\.1|\[::1\])$/.test(location.hostname);
@@ -475,13 +475,25 @@
       logNote(`microphone: ${err.message || err}; typing only (press D)`, "error");
       setInterval(() => { if (sonic && !muted) sonic.audio(silence); }, 32);
       lastUserAt = Date.now();
-      return openSonic("typing only");
+      openSonic("typing only");
+      return greet();
     }
     setState("followup", "Listening. Just talk, no wake word needed.");
     DS?.status(`ears: Nova 2 Sonic (${config.sonic.region}, ${voiceId})${BARGE_IN ? ", barge-in on" : ", half-duplex"}`);
     lastUserAt = Date.now();
     openSonic("start");
+    greet();
   });
+
+  /** Like an Echo, she speaks first: a "hello" through Sonic, so the agent's greeting is heard instead of silence. */
+  function greet() {
+    setTimeout(() => {
+      if (!sonic || muted || heardLog.length) return; // they already started talking
+      logNote("greeting");
+      heardLog.push("hello");
+      sonic.text("hello");
+    }, 600);
+  }
 
   device.addEventListener("click", () => { if (started) { if (isSpeaking()) stopSpeaking(); else toggleMute(); } });
 

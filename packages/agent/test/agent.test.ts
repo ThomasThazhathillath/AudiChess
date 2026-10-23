@@ -1,6 +1,9 @@
 import type { ConverseCommandInput, ConverseCommandOutput } from "@aws-sdk/client-bedrock-runtime";
 import { describe, expect, it } from "vitest";
 import {
+  quickChat,
+  withoutCoaching,
+  cleanSpeech as cleanSpeechForTest,
   addressedToAlexa,
   answerToPending,
   quickMoveReply,
@@ -668,6 +671,39 @@ describe("Phase 6: background speech, speed and shorter answers", () => {
     expect(chat).toContain("slightly better");
     expect(chat).not.toMatch(/pawn to d4|knight to e5|bishop on b4/);
     expect(await seen("any ideas for me here?")).toContain("pawn to d4");
+  });
+
+  it("answers thinking noises, a bare okay and oops instantly, without repeating herself", () => {
+    const inGame = (texts: string[] = []) => ({ sessionId: "q", gameId: "g", gameOver: false, turns: texts.map((text, i) => ({ role: i % 2 ? "assistant" : "user", text })) }) as any;
+    expect(quickChat("hmm, let me think", inGame())).toBe("Take your time.");
+    expect(quickChat("hmm, let me think", inGame(["x", "Take your time."]))).not.toBe("Take your time.");
+    expect(quickChat("okay", inGame(["e4", "Pawn to e4. I play e5."]))).toBeDefined();
+    expect(quickChat("oops", inGame(["Ba6", "Bishop to a6. I play rook takes."]))).toMatch(/undo/);
+    // An answer to her question is not small talk.
+    expect(quickChat("okay", inGame(["x", "Do you want to resign this game? Say \"I resign\" to confirm."]))).toBeUndefined();
+    expect(quickChat("what's my best move", inGame())).toBeUndefined();
+    expect(quickChat("this is fun", inGame())).toMatch(/enjoying|me too/i);
+    expect(quickChat("I love this game", inGame())).toBeDefined();
+  });
+
+  it("only takes a move back when asked, or after a yes to her offer", async () => {
+    const sessions = new MemorySessionStore();
+    await gameSession(sessions, "s-undo");
+    const { tools, calls } = fakeTools();
+    const s = scriptedConverse([use("undo", {}), say("Taken back.")]);
+    const r = await runTurn({ converse: s.converse, tools, sessions, modelId: "m" }, "s-undo", "ugh, that was bad");
+    expect(calls.filter((c) => c.name === "undo")).toHaveLength(0);
+    expect(r.reply).toMatch(/take that move back/i);
+    const s2 = scriptedConverse([use("undo", {}), say("Taken back.")]);
+    await runTurn({ converse: s2.converse, tools, sessions, modelId: "m" }, "s-undo", "yes please");
+    expect(calls.filter((c) => c.name === "undo")).toHaveLength(1);
+  });
+
+  it("keeps warnings out of analysis nobody asked about, and strips filler closers", () => {
+    const facts = { evaluation: { says: "even" }, speech: "Position: even. I'm threatening pawn takes knight.", threat: { myBestMoveIfIgnored: "pawn takes knight" }, yourPiecesUnderAttack: ["knight on f3"], bestMoves: [{}] };
+    expect(Object.keys(withoutCoaching(facts, "how am I doing?"))).toEqual(["evaluation"]);
+    expect(withoutCoaching(facts, "what are you threatening?")).toHaveProperty("threat");
+    expect(cleanSpeechForTest("Thanks! Let's keep the game going.")).toBe("Thanks!");
   });
 
   it("starts the new game when the answer to her colour question follows a restart request", async () => {
