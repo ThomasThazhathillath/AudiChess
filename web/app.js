@@ -8,10 +8,12 @@
   const device = $("device"), live = $("live"), startEl = $("start"), startBtn = $("start-btn"), startNote = $("start-note");
   const debugEl = $("debug"), debugLog = $("debug-log");
 
-  const BUILD = "sonic-8"; // shown in the debug drawer, to confirm which code the browser runs
+  const BUILD = "sonic-9"; // shown in the debug drawer, to confirm which code the browser runs
 
   const params = new URLSearchParams(location.search);
   const LOCAL = /^(localhost|127\.0\.0\.1|\[::1\])$/.test(location.hostname);
+  // The debug drawer (D) and the debug screen are for local testing only: the live site has neither (2026-10-23).
+  const DRAWER = LOCAL;
   // The mic is half-duplex by default, like a walkie-talkie: while she talks Sonic gets silence, so she can't hear
   // herself through the speakers; tap the speaker or press Esc to cut her off. ?bargein=1 streams the mic throughout
   // (with headphones), and Sonic's own barge-in stops her when you talk over her.
@@ -101,8 +103,8 @@
     DS?.event(kind, text);
   }
 
-  // ---------- debug screen: local testing only (?debug=1 shows it anywhere), never on the live site by default ----------
-  const DS = (LOCAL && params.get("debug") !== "0") || params.get("debug") === "1" ? window.DebugScreen : null;
+  // ---------- debug screen: local testing only, never on the live site ----------
+  const DS = LOCAL && params.get("debug") !== "0" ? window.DebugScreen : null;
   DS?.init({ state: () => ({ speaking: isSpeaking(), busy, muted, awakeUntil: 0, followUpUntil: 0, openMic: true, halfDuplex: !BARGE_IN }) });
 
   // The drawer's log survives reloads (last 500 lines), so a whole game can be reviewed afterwards.
@@ -475,15 +477,15 @@
     startEl.hidden = true;
     earcon.wake();
     if (!config?.sonic) {
-      setState("error", "The voice isn't set up on this site yet. Press D to type.");
+      setState("error", `The voice isn't set up on this site yet.${DRAWER ? " Press D to type." : ""}`);
       return logNote("config.json has no sonic settings: deploy with scripts/deploy.ps1", "error");
     }
     try {
       await startMic();
     } catch (err) {
       // No microphone: typed turns (D) still get her voice. Sonic needs a steady audio stream, so it gets silence.
-      setState("error", "I need the microphone. Allow it and reload, or press D to type.");
-      logNote(`microphone: ${err.message || err}; typing only (press D)`, "error");
+      setState("error", `I need the microphone. Allow it and reload${DRAWER ? ", or press D to type" : ""}.`);
+      logNote(`microphone: ${err.message || err}; typing only`, "error");
       setInterval(() => { if (sonic && !muted) sonic.audio(silence); }, 32);
       lastUserAt = Date.now();
       openSonic("typing only");
@@ -510,7 +512,7 @@
 
   document.addEventListener("keydown", (e) => {
     if (e.target instanceof HTMLInputElement || e.target instanceof HTMLSelectElement) return;
-    if (e.key === "d" || e.key === "D") { debugEl.hidden = !debugEl.hidden; }
+    if (e.key === "d" || e.key === "D") { if (DRAWER) debugEl.hidden = !debugEl.hidden; }
     else if (e.key === "m" || e.key === "M") { if (started) toggleMute(); }
     else if (e.key === "Escape" || e.code === "Space") { if (isSpeaking()) { e.preventDefault(); stopSpeaking(); } }
   });
@@ -539,7 +541,7 @@
   }, 60000);
 
   logNote(`build ${BUILD} · voice: Nova 2 Sonic, speech to speech · ${BARGE_IN ? "barge-in on (use headphones)" : "half-duplex: tap or Esc to interrupt"}`);
-  if (!window.AudioWorkletNode || !navigator.mediaDevices?.getUserMedia) startNote.textContent = "This browser can't stream the microphone. Use a recent Chrome, Edge, Safari or Firefox, or press D to type.";
+  if (!window.AudioWorkletNode || !navigator.mediaDevices?.getUserMedia) startNote.textContent = `This browser can't stream the microphone. Use a recent Chrome, Edge, Safari or Firefox${DRAWER ? ", or press D to type" : ""}.`;
 
   // ---------- config + warm-up ----------
   fetch("config.json", { cache: "no-store" })

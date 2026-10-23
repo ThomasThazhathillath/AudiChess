@@ -138,7 +138,8 @@ node scripts/serve-web.mjs
 ```
 
 The MCP server runs on port 3001, the agent on 3002 and the page on 5173.
-Without a microphone, press **D** for the debug drawer and type turns.
+Without a microphone, press **D** for the debug drawer and type turns. The drawer exists only on localhost, not on the
+live site.
 
 ## Deploy
 
@@ -179,11 +180,12 @@ workaround and a suggestion. All of it comes from real-mic games, eval runs and 
 ## Repository
 
 ```
-web/                      Echo simulator page: Sonic session (sonic.js), app, debug drawer (D)
+web/                      AudiChess page: Sonic session (sonic.js), app, debug drawer (D, localhost only)
 packages/mcp-server/      MCP server: tools, chess wrapper, Stockfish engine, spoken-move resolver
 packages/agent/           Agent: tool loop, routing, banter, skill, evals
 layers/stockfish/         Stockfish Lambda layer
 template.yaml             SAM: every AWS resource
 scripts/deploy.ps1        build + deploy + upload
 docs/FRICTION_LOG.md      friction log: 16 entries on Nova 2 Sonic, Nova 2 Lite, Bedrock, Cognito, Alexa+ and MCP
+docs/PRODUCT_FEEDBACK.md  product feedback: every tool and AWS service we used, what worked, what needs work
 ```
