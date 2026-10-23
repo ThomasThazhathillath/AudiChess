@@ -170,6 +170,12 @@ browser Sonic SDK bundle and uploads the page.
 - questions: about $0.04 of model for a 60-turn game;
 - voice: about $0.012 per minute of talking.
 
+## Friction log
+
+[`docs/FRICTION_LOG.md`](docs/FRICTION_LOG.md) has 16 entries on Nova 2 Sonic, Nova 2 Lite, Bedrock, Cognito,
+Alexa+ and MCP on Lambda. Each gives the task, the steps, what we expected vs. what happened, a severity, our
+workaround and a suggestion. All of it comes from real-mic games, eval runs and deploys.
+
 ## Repository
 
 ```
@@ -179,5 +185,5 @@ packages/agent/           Agent: tool loop, routing, banter, skill, evals
 layers/stockfish/         Stockfish Lambda layer
 template.yaml             SAM: every AWS resource
 scripts/deploy.ps1        build + deploy + upload
-docs/PLAN.md              the full build log: every phase, what broke, how it was measured, what it cost
+docs/FRICTION_LOG.md      friction log: 16 entries on Nova 2 Sonic, Nova 2 Lite, Bedrock, Cognito, Alexa+ and MCP
 ```

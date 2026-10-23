@@ -12,3 +12,6 @@ web/vendor/
 CLAUDE.md
 CLAUDE.local.md
 .mcp.json
+
+# Build log (local only)
+docs/PLAN.md
