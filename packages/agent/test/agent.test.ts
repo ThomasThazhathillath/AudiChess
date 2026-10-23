@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   quickChat,
   incompleteMove,
+  maybeUndo,
   askRestOfMove,
   joinSplitMove,
   withoutCoaching,
@@ -398,6 +399,30 @@ describe("Phase 5: lively, non-repeating conversation", () => {
     expect(seen[0]).toMatchObject({ move: "no, knight f3" });
     expect(r.reply).toBe("Knight to f3; I answer pawn to d5.");
     expect((await sessions.get("s-no-move"))!.pending).toBeUndefined();
+  });
+
+  it("asks about a misheard undo, and a yes takes the move back", async () => {
+    // "undo the last move" came through as "unbelievable isn't it" three times (2026-10-23 real game).
+    const sessions = new MemorySessionStore();
+    await gameSession(sessions, "s-unbel");
+    const s0 = (await sessions.get("s-unbel"))!;
+    await sessions.put({ ...s0, turns: [...s0.turns, { role: "user", text: "e three" }, { role: "assistant", text: "Pawn to e3. I play pawn to b5." }] });
+    const calls: string[] = [];
+    const tools: ChessTools = {
+      listTools: async () => [...MCP_TOOLS, { name: "undo", description: "Undo", inputSchema: { type: "object", properties: { gameId: { type: "string" } } } }],
+      callTool: async (name) => { calls.push(name); return { isError: false, data: { speech: "Took back pawn to e3. It's your move as White." } }; },
+    };
+    const s = scriptedConverse([]);
+    const deps = { converse: s.converse, tools, sessions, modelId: "m" };
+    expect((await runTurn(deps, "s-unbel", "unbelievable isn't it")).reply).toBe("Did you say undo? Say yes and I'll take that back.");
+    expect(calls).toHaveLength(0);
+    const r = await runTurn(deps, "s-unbel", "yes");
+    expect(calls).toEqual(["undo"]);
+    expect(r.reply).toMatch(/took back/i);
+    expect(s.calls).toHaveLength(0);
+    // Not after a question or out of a game.
+    expect(maybeUndo("unbelievable", { sessionId: "x", turns: [], updatedAt: "", expiresAt: 0 })).toBe(false);
+    expect(maybeUndo("undo the last move", { sessionId: "x", gameId: "g", turns: [{ role: "assistant", text: "I play pawn to b5." }], updatedAt: "", expiresAt: 0 })).toBe(false);
   });
 
   it("asks for the rest of a split move and joins the next turn to it", async () => {

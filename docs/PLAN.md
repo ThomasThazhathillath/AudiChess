@@ -1263,3 +1263,19 @@ Tests: agent 88, server 175.
 garbles with a live mic in a noisy room. Both need the user's own game. "Only three" is still a guess for the model.
 
 **Cost:** about $0.03.
+
+### Phase 10d — a misheard "undo" (2026-10-23)
+
+**Problem:** the user said "undo the last move" three times on `sonic-5`. Sonic wrote "unbelievable isn't it" each
+time, and she answered "Unbelievable, right? But keep playing!" three times. Correctly heard undo phrasings were
+already routed straight to `undo` (checked: "undo the last move", "please undo the last move", "take back the last
+move"…).
+
+**Changed (build `sonic-7`):**
+- **`maybeUndo`:** right after one of her move replies, a short utterance starting like "undo" ("unbeliev…",
+  "undue", "on do", "and do"…) gets "Did you say undo? Say yes and I'll take that back.", with no model call.
+- **A yes to a take-back offer** goes straight to `undo` (was left to the model).
+- The Sonic word list now has "undo the last move" and "take it back".
+
+**Checked:** live (typed) on `sonic-7`, "e three", then "unbelievable isn't it" → "Did you say undo?…", then "yes"
+→ "Took back pawn to e3." Tests: agent 89, page 59 + 30. **Cost:** under $0.01.

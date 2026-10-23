@@ -685,7 +685,22 @@ export function quickChat(text: string, session: Session): string | undefined {
 /** Words that ask for a take-back, or a yes right after she offered one. Anything else must not undo a move. */
 const UNDO_WORDS = /\b(?:undo|take (?:it|that|this|my move|the move)? ?back|takeback|take-back|go back|revert|cancel (?:that|my) move)\b/i;
 function wantsUndo(text: string, session: Session): boolean {
-  if (UNDO_WORDS.test(text)) return true;
+  return UNDO_WORDS.test(text) || yesToUndo(text, session);
+}
+
+/** "Undo the last move" as Sonic heard it: "unbelievable isn't it", three times in a row (2026-10-23 real game). */
+const UNDO_SOUNDALIKE = /^\W*(?:un(?:believ|do|due|du)\w*|undue|on do|and do|in do)\b/i;
+export const UNDO_CHECK = "Did you say undo? Say yes and I'll take that back.";
+/** Right after a move: words that may be a misheard "undo". She asks rather than taking the move back unasked. */
+export function maybeUndo(text: string, session: Session): boolean {
+  if (!session.gameId || session.gameOver || session.pending || UNDO_WORDS.test(text)) return false;
+  if (!UNDO_SOUNDALIKE.test(text) || text.trim().split(/\s+/).length > 6) return false;
+  const lastReply = [...session.turns].reverse().find((x) => x.role === "assistant")?.text ?? "";
+  return /\bI (?:play|answer)\b/.test(lastReply) || lastReply === UNDO_CHECK;
+}
+
+/** A yes right after she offered a take-back. */
+function yesToUndo(text: string, session: Session): boolean {
   const lastReply = [...session.turns].reverse().find((x) => x.role === "assistant")?.text ?? "";
   return /\b(take (?:that|it) back|say undo)\b/i.test(lastReply) && /^(?:yes|yeah|yep|yup|sure|ok(?:ay)?|please|do it|go ahead)\b/i.test(text.trim());
 }
@@ -1005,6 +1020,8 @@ export async function runTurn(deps: AgentDeps, sessionId: string, input: TurnInp
     const partial = incompleteMove(userText, session)!;
     session = { ...session, partialMove: partial };
     reply = askRestOfMove(partial);
+  } else if (maybeUndo(userText, session)) {
+    reply = UNDO_CHECK;
   } else if (isFaintMove(moveHeard, session)) {
     // Also when "woken": the page sends everything as addressed to her since Sonic (2026-10-23).
     reply = FAINT_REASK[session.turns.length % FAINT_REASK.length];
@@ -1217,7 +1234,10 @@ export async function runTurn(deps: AgentDeps, sessionId: string, input: TurnInp
   // ---------- routed questions: the tool is obvious, so the model doesn't have to choose it ----------
   if (!reply && !ignored && startRound === 0 && !unsure && session.gameId && !session.gameOver) {
     // Right after an undo the mistake is gone from the history: "what should I have played?" is the best move here.
-    const route = session.justUndid && SHOULD_HAVE.test(userText) ? { name: "hint", args: { count: 1, reveal: true } as Record<string, unknown>, phrase: false } : routeQuestion(userText);
+    // A yes to her take-back offer ("Did you say undo?") is an undo: no model needed.
+    const route = session.justUndid && SHOULD_HAVE.test(userText)
+      ? { name: "hint", args: { count: 1, reveal: true } as Record<string, unknown>, phrase: false }
+      : yesToUndo(userText, session) ? { name: "undo", args: {} as Record<string, unknown> } : routeQuestion(userText);
     if (route) {
       timings.fastPath = true;
       const { content, isError } = await runTool(route.name, route.args);

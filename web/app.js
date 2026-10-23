@@ -8,7 +8,7 @@
   const device = $("device"), live = $("live"), startEl = $("start"), startBtn = $("start-btn"), startNote = $("start-note");
   const debugEl = $("debug"), debugLog = $("debug-log");
 
-  const BUILD = "sonic-6"; // shown in the debug drawer, to confirm which code the browser runs
+  const BUILD = "sonic-7"; // shown in the debug drawer, to confirm which code the browser runs
 
   const params = new URLSearchParams(location.search);
   const LOCAL = /^(localhost|127\.0\.0\.1|\[::1\])$/.test(location.hostname);
