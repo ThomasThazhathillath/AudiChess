@@ -79,7 +79,7 @@ console.log(`wake.js: ${n + 11 + 5 + 14 + 7 + 10} checks passed`);
 new Function(readFileSync(new URL("../web/sonic.js", import.meta.url), "utf8"))();
 const Sonic = globalThis.AlexaSonic;
 let s = 0;
-for (const [heard, want] of [["e-four.", "e four"], ["knight f-three.", "knight f three"], ["what should i have played?", "what should i have played?"], ["Bishop c-four!", "Bishop c four"], ["  let's play chess. ", "let's play chess"]]) {
+for (const [heard, want] of [["e-four.", "e four"], ["knight f-three.", "knight f three"], ["what should i have played?", "what should i have played?"], ["Bishop c-four!", "Bishop c four"], ["  let's play chess. ", "let's play chess"], ["[spk]", ""], ["[spk] undo", "undo"]]) {
   assert.equal(Sonic.clean(heard), want, heard);
   s++;
 }
@@ -124,12 +124,12 @@ const tick = () => new Promise((r) => setTimeout(r, 20));
   session.audio(new Int16Array(512));
   await tick(); await tick(); await tick(); await tick();
   const kinds = f.sent.map((e) => Object.keys(e)[0]);
-  assert.deepEqual(kinds.slice(0, 9), ["sessionStart", "promptStart", "contentStart", "textInput", "contentEnd", "contentStart", "textInput", "contentEnd", "contentStart"]);
-  assert.equal(f.sent[1].promptStart.audioOutputConfiguration.voiceId, "kiara");
+  assert.deepEqual(kinds.slice(0, 6), ["sessionStart", "promptStart", "contentStart", "textInput", "contentEnd", "contentStart"]);
+  assert.equal(f.sent[1].promptStart.audioOutputConfiguration.voiceId, "amy");
   assert.equal(f.sent[2].contentStart.role, "SYSTEM");
   assert.match(f.sent[3].textInput.content, /LANGUAGE LOCK: English only/);
-  assert.equal(f.sent[5].contentStart.role, "SYSTEM_SPEECH");
-  assert.equal(f.sent[8].contentStart.type, "AUDIO");
+  assert.ok(!f.sent.some((e) => e.contentStart?.role === "SYSTEM_SPEECH"), "no Hindi speech prompt");
+  assert.equal(f.sent[5].contentStart.type, "AUDIO");
   assert.ok(kinds.includes("audioInput"));
   assert.deepEqual(heard, ["e-four."]);
   assert.deepEqual(calls, ["e four"], "the agent is asked once per user turn");
@@ -140,4 +140,7 @@ const tick = () => new Promise((r) => setTimeout(r, 20));
   assert.ok(closed);
   s += 12;
 }
+// English only: another script, or mostly Hindi in Latin letters, is dropped; chess words always count.
+for (const t of ["achaman kaash koi nahin", "yeh sunte hain", "maine tab key", "लेट्स प्ले चेस"]) { assert.equal(Sonic.isEnglish(t), false, t); s++; }
+for (const t of ["knight f three", "that's an interesting move", "white easy", "sure", "so the meeting is on tuesday then", "main point is the bishop", "e four"]) { assert.equal(Sonic.isEnglish(t), true, t); s++; }
 console.log(`sonic.js: ${s} checks passed`);

@@ -21,7 +21,7 @@ export interface Session {
   pending?: { candidates: string[]; asks: number };
   /** How much Alexa comments: "minimal" | "brief" (default) | "chatty". */
   chattiness?: Chattiness;
-  /** Nova 2 Sonic voice id, e.g. "kiara". */
+  /** Nova 2 Sonic voice id, e.g. "amy". */
   voice?: string;
   /** Repeat each move back and play it only after a yes. */
   confirmMoves?: boolean;

@@ -55,7 +55,7 @@ export interface TurnResult {
   /** True when Alexa asked a question and expects an answer (the page keeps listening without the wake word). */
   expectsReply: boolean;
   toolCalls: ToolTrace[];
-  /** The Nova 2 Sonic voice the page speaks with ("kiara"). */
+  /** The Nova 2 Sonic voice the page speaks with ("amy"). */
   voice: string;
   usage: { inputTokens: number; outputTokens: number; cacheReadTokens: number; cacheWriteTokens: number; rounds: number };
 }

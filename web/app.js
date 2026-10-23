@@ -8,7 +8,7 @@
   const device = $("device"), live = $("live"), startEl = $("start"), startBtn = $("start-btn"), startNote = $("start-note");
   const debugEl = $("debug"), debugLog = $("debug-log");
 
-  const BUILD = "sonic-2"; // shown in the debug drawer, to confirm which code the browser runs
+  const BUILD = "sonic-3"; // shown in the debug drawer, to confirm which code the browser runs
 
   const params = new URLSearchParams(location.search);
   const LOCAL = /^(localhost|127\.0\.0\.1|\[::1\])$/.test(location.hostname);
@@ -35,7 +35,10 @@
   let started = false;
   let muted = false;
   let busy = false;        // the agent is working on a reply
-  let voiceId = store.get("alexaChess.voice", "kiara");
+  // English voices only (Kiara, an Indian English and Hindi voice, made Sonic hear English as Hindi): a saved "kiara"
+  // falls back to Amy.
+  const VOICE_IDS = ["amy", "tiffany", "matthew", "olivia"];
+  let voiceId = VOICE_IDS.includes(store.get("alexaChess.voice", "")) ? store.get("alexaChess.voice", "") : "amy";
 
   function setState(s, announce) {
     device.dataset.state = s;
@@ -149,8 +152,9 @@
       const res = await fetch(config.agentUrl, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        // woken: false = an open-mic conversation, so the agent drops what is clearly background talk.
-        body: JSON.stringify({ sessionId, text, alternatives, woken: false }),
+        // woken: true = always for Alexa. Sonic hears clearly enough, and the background-talk filter (built for Chrome's
+        // recognizer) dropped "that's an interesting move" (2026-10-23): she answers everything in English now.
+        body: JSON.stringify({ sessionId, text, alternatives, woken: true }),
       });
       data = await res.json().catch(() => ({}));
       if (!res.ok || (!data.reply && !data.ignored)) throw new Error(data.error || `HTTP ${res.status}`);
@@ -295,6 +299,7 @@
         const said = window.AlexaSonic.clean(lastHeard() || heard);
         const other = window.AlexaSonic.clean(heard);
         if (window.AlexaWake.isSleepCommand([said])) { dropAudio = true; setTimeout(sleepByVoice, 0); return ""; }
+        if (!window.AlexaSonic.isEnglish(said)) { dropAudio = true; logNote(`ignored "${said}" (not English)`, "ignored"); return ""; }
         if (window.AlexaWake.isOnlyStop(said)) { dropAudio = true; logNote(`"${said}": nothing to stop`); return ""; }
         const say = await askAgent(said, other && other !== said ? [said, other] : [said]);
         if (!say) dropAudio = true;
@@ -305,7 +310,9 @@
       onRepeatTool: (heard) => {
         repeats++;
         if (repeats === 1) logNote(`Sonic asked again for "${heard}": not sent`);
-        if (repeats === 3) { renewAfterTurn = "Sonic kept repeating the tool call"; setTimeout(maybeRenew, 0); }
+        // The first repeat already: in the next live game it went on for 4 minutes, inventing "play e4", "castle
+        // kingside", "your move please"... (2026-10-23, build sonic-1).
+        if (repeats === 1) { renewAfterTurn = "Sonic kept repeating the tool call"; setTimeout(maybeRenew, 0); }
       },
       onAudio: playChunk,
       onInterrupted: () => { logNote("interrupted: she stopped talking", "interrupt"); stopSpeaking(); },

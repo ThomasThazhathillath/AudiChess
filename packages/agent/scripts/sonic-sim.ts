@@ -14,9 +14,9 @@ import { MemorySessionStore } from "../src/sessions.js";
 // Costs about $0.02 a run (Sonic in ap-northeast-1 plus Nova 2 Lite in ap-south-1).
 
 const here = dirname(fileURLToPath(import.meta.url));
-const AUDIO = join(here, "..", "eval-results", "sonic-audio");
+const AUDIO = join(here, "..", "eval-results", process.env.SONIC_AUDIO ?? "sonic-audio");
 const SONIC_REGION = process.env.SONIC_REGION ?? "ap-northeast-1";
-const VOICE = process.env.VOICE ?? "kiara";
+const VOICE = process.env.VOICE ?? "amy";
 
 // The page's code, loaded the way the browser loads it.
 new Function(readFileSync(join(here, "..", "..", "..", "web", "sonic.js"), "utf8"))();
@@ -65,7 +65,7 @@ const started = Date.now();
 const s = Sonic.open({
   send: (input: any) => sonicClient.send(new InvokeModelWithBidirectionalStreamCommand(input)),
   voiceId: VOICE,
-  onUserText: (t: string) => { const turn = turns[current]; if (!turn) return; turn.heard.push(t); turn.heardMs ??= Date.now() - phraseEndAt; },
+  onUserText: (t: string) => { const turn = turns[current]; if (!turn || !Sonic.clean(t)) return; turn.heard.push(t); turn.heardMs ??= Date.now() - phraseEndAt; },
   onRepeatTool: () => { if (turns[current]) turns[current].repeatCalls++; },
   onToolUse: async ({ heard }: { heard: string }) => {
     const turn = turns[current];
@@ -74,7 +74,8 @@ const s = Sonic.open({
     turn?.toolHeard.push(heard);
     const t = Date.now();
     if (turn) turn.toolMs ??= t - phraseEndAt;
-    const r = await runTurn(deps, sessionId, { text, alternatives: heard && heard !== text ? [text, heard] : [], woken: false });
+    if (!Sonic.isEnglish(text)) { turn?.replies.push("(not English)"); return ""; } // as the page does
+    const r = await runTurn(deps, sessionId, { text, alternatives: heard && heard !== text ? [text, heard] : [], woken: true });
     turn?.agentMs.push(Date.now() - t);
     liteIn += r.usage.inputTokens; liteOut += r.usage.outputTokens;
     const say = r.ignored ? "" : r.reply;

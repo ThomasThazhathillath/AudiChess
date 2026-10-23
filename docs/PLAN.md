@@ -1041,3 +1041,47 @@ Sonic heard every phrase in the user's first real-mic game: "hey alexa, let's pl
 easy", "d4", then "let's start a new game", "white easy" started a new game; she spoke each reply (2.8–4.8 s).
 
 **Tests:** agent 80, page 59 + 17. **Cost:** about $0.03 (one harness run, the local repro, live check).
+
+### Phase 9c — English only, and she answers everything (2026-10-23)
+
+The second real-mic game (build `sonic-2`) started well: "let's play chess", "easy, white" and "d four" were all
+played. Then three things went wrong:
+- **"Knight f3" was heard as "maine tab key".** Kiara is an Indian English *and Hindi* voice, and Sonic's Hindi
+  speech prompt told it to write Hindi in Latin letters. Together they made Sonic hear Indian-accented English as Hindi.
+- **"That's an interesting move" got no reply.** The agent's background-talk filter, built for Chrome's open mic,
+  dropped it.
+- **Sonic re-called the tool after dropped turns.** In the `sonic-1` part of that log the loop ran for 4 minutes,
+  inventing "play e4", "castle kingside", "your move please"…
+
+**Measured before choosing:**
+- Sonic's Arjun and Kiara voices read 10 phrases in Indian English (`scripts/make-accent-audio.ts`, about $0.01).
+- `scripts/sonic-asr.ts` compared what Sonic wrote down:
+
+  | voice, Hindi speech prompt | "e4" | "knight f3" | the rest |
+  |---|---|---|---|
+  | Kiara, on (`sonic-2`) | "ee fear" | ✓ | ✓ |
+  | Kiara, off | Devanagari | Devanagari | 2 more in Devanagari |
+  | Matthew, off | ✓ | ✓ | all ✓ |
+  | Amy, off | ✓ | ✓ | all ✓ |
+
+**Changed (build `sonic-3`):**
+- **English voices only.** Amy (British) is the default; American (Tiffany, Matthew) and Australian (Olivia) are
+  the others. Kiara, Arjun and the Hindi speech prompt are gone, and a saved "kiara" falls back to Amy.
+- **Non-English is dropped by the page** (`AlexaSonic.isEnglish`): another script, or mostly romanized-Hindi words
+  ("yeh sunte hain", "achaman kaash koi nahin", "maine tab key"). Chess words always count as English.
+- **Everything in English goes to the agent as addressed to her** (`woken: true`), so she answers small talk
+  instead of dropping it.
+- **The first repeat tool call already opens a fresh stream.**
+- Sonic's noise markers ("[spk]") are stripped from transcripts. One had been sent to the agent as a move.
+
+**Checked:**
+- Harness on the Indian-accent audio: 10/10 heard right, 10/10 said word for word, no repeat calls, first sound
+  1.8 s on average, $0.024.
+- Live (typed): "knight f3" played; "that's an interesting move" answered; "yeh sunte hain" dropped with no loop;
+  every reply spoken.
+- Tests: page 59 + 30, agent 80.
+
+**Seen, not fixed:** "that's an interesting move" got the engine's best move (`analyze_position`). That is unasked
+coaching, against SKILL rule 3.
+
+**Cost of 9c:** about $0.11 (accent audio $0.01, ASR comparison about $0.04, 2 harness runs $0.05, live check).

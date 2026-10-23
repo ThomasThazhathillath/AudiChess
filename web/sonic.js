@@ -7,7 +7,7 @@
 
   const TOOL = "alexa";
   const SYSTEM = [
-    "You are a warm, helpful female assistant: the voice of Alexa, a smart speaker that plays chess by voice with someone who cannot see the board.",
+    "You are a warm, helpful assistant: the voice of Alexa, a smart speaker that plays chess by voice with someone who cannot see the board.",
     "You never decide what to say yourself. Every time the user says anything at all, call the alexa tool with their words exactly as you heard them, even if it is one word, a greeting or sounds unclear.",
     "When the tool returns, say its \"say\" text out loud exactly, word for word: never add, drop, reorder or rephrase anything, and never add your own greeting, \"okay\", \"sure\" or a question.",
     "If \"say\" is empty, stay completely silent.",
@@ -15,9 +15,6 @@
     "LANGUAGE LOCK: English only. Always transcribe the user in English words and Latin letters, never in Devanagari or any other script, and always speak English, even if the user speaks Hindi or another language.",
     "Chess words to listen for: pawn, knight, bishop, rook, queen, king, takes, castle kingside, castle queenside, check, undo, and squares like e4 or f3 (a letter from a to h, then a number from 1 to 8).",
   ].join(" ");
-  // Sonic's own "speech prompt", exactly as documented (it must not be reworded): Kiara and Arjun are Indian English and
-  // Hindi voices, and without it "let's play chess" came back in Devanagari (harness, 2026-10-23).
-  const SPEECH = "If the input audio/speech contains hindi, then the transcription and response should be in All Latin script (romanized Hindi).";
 
   /** Every input event of a Sonic session, in protocol order (Nova 2 Sonic, 2026-10). */
   const events = {
@@ -69,9 +66,27 @@
 
   /**
    * Sonic's transcript as the agent's move matcher expects it: "e-four." -> "e four", "f-three" -> "f three". The
-   * hyphenated square made the agent drop "e4" as background talk (harness, 2026-10-23).
+   * hyphenated square made the agent drop "e4" as background talk (harness, 2026-10-23). Sonic's noise markers ("[spk]")
+   * go too: one was sent to the agent as a move.
    */
-  const clean = (text) => String(text || "").replace(/(\w)-(?=\w)/g, "$1 ").replace(/\s+/g, " ").replace(/^[\s.,!?]+|[\s.,!]+$/g, "").trim();
+  const clean = (text) => String(text || "").replace(/\[[a-z_ ]+\]/gi, " ").replace(/(\w)-(?=\w)/g, "$1 ").replace(/\s+/g, " ").replace(/^[\s.,!?]+|[\s.,!]+$/g, "").trim();
+
+  /**
+   * English only (the user, 2026-10-23: "anything other than English shouldn't even be considered"): no other script,
+   * and not mostly Hindi in Latin letters ("achaman kaash koi nahin", "yeh sunte hain" from the room). Chess words
+   * always count as English.
+   */
+  const HINDI = /^(?:hai|hain|nahin|nahi|nahi?n|kya|kyun|kyon|aur|mein|maine|mujhe|mera|meri|tum|tera|aap|yeh|ye|woh|wo|kaash|koi|acha|accha|achha|theek|thik|haan|han|bhai|kar|karo|karna|raha|rahe|rahi|tha|thi|sunte|suno|chalo|abhi|lekin|kaise|kaun|bahut|bas|ruko|wala|wali|matlab|hum|humko|unko|usko|isko|toh|bhi|ka|ki|ke|ko|se|jo|jab|tab|kuch|sab|phir|fir|ab|hoga|hogi|ho|gaya|gayi|diya|liya|dekho|bolo|batao|chahiye|achaman)$/i;
+  const CHESS = /\b(?:pawn|knight|bishop|rook|queen|king|castle|check|checkmate|undo|takes|chess|game|move|[a-h]\s?[1-8]|[a-h] (?:one|two|three|four|five|six|seven|eight))\b/i;
+  function isEnglish(text) {
+    const t = String(text || "").trim();
+    if (!t) return false;
+    if (/[^\x00-\x7F‘’“”–—…]/.test(t)) return false; // another script
+    if (CHESS.test(t)) return true;
+    const words = t.toLowerCase().replace(/[^a-z' ]/g, " ").split(/\s+/).filter(Boolean);
+    const hindi = words.filter((w) => HINDI.test(w)).length;
+    return !(hindi >= 2 || (hindi >= 1 && hindi / words.length >= 0.3));
+  }
 
   const uuid = () => (globalThis.crypto?.randomUUID ? globalThis.crypto.randomUUID() : `${Date.now()}-${Math.random().toString(36).slice(2)}`);
 
@@ -112,7 +127,7 @@
    * Open one Sonic stream.
    * @param {object} o
    *   o.send(input) -> Promise<{ body: AsyncIterable }>: the SDK call (InvokeModelWithBidirectionalStreamCommand).
-   *   o.voiceId: Sonic voice ("kiara"). o.endpointing: "HIGH" | "MEDIUM" | "LOW".
+   *   o.voiceId: Sonic voice ("amy"). o.endpointing: "HIGH" | "MEDIUM" | "LOW".
    *   o.onUserText(text): what Sonic heard (final ASR). o.onToolUse({ toolUseId, heard }) -> Promise<string>: the
    *   words to say ("" = silence). o.onAssistantText(text, stage). o.onAudio(base64Pcm24k). o.onInterrupted().
    *   o.onAudioEnd(stopReason). o.onTurnEnd() (completionEnd). o.onRepeatTool(heard). o.onUsage(usageEvent). o.onClose(error | undefined).
@@ -125,15 +140,11 @@
     let ended = false;
 
     q.push(events.sessionStart(o.endpointing || "HIGH"));
-    q.push(events.promptStart(promptName, o.voiceId || "kiara"));
+    q.push(events.promptStart(promptName, o.voiceId || "amy"));
     const sys = uuid();
     q.push(events.textStart(promptName, sys, "SYSTEM", false));
     q.push(events.text(promptName, sys, o.system || SYSTEM));
     q.push(events.contentEnd(promptName, sys));
-    const sp = uuid();
-    q.push(events.textStart(promptName, sp, "SYSTEM_SPEECH", false));
-    q.push(events.text(promptName, sp, SPEECH));
-    q.push(events.contentEnd(promptName, sp));
     q.push(events.audioStart(promptName, audioName));
 
     // One agent call per thing the user said. Sonic called the tool again and again (25 times for one phrase) when
@@ -232,5 +243,5 @@
     };
   }
 
-  root.AlexaSonic = { SYSTEM, TOOL, clean, events, open, pcmToBase64 };
+  root.AlexaSonic = { SYSTEM, TOOL, clean, events, isEnglish, open, pcmToBase64 };
 })(typeof window !== "undefined" ? window : globalThis);
