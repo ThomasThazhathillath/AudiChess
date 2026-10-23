@@ -1,4 +1,4 @@
-// Alexa Chess: a voice-only Echo. Mic -> Nova 2 Sonic (speech to speech, streamed from this page) -> the chess agent
+// AudiChess: a voice-only Echo. Mic -> Nova 2 Sonic (speech to speech, streamed from this page) -> the chess agent
 // (Sonic's tool) -> Sonic speaks the agent's reply. Chrome's recognizer, the browser voice and Polly were removed on
 // 2026-10-23: they misheard and mispronounced too much.
 (() => {
@@ -8,7 +8,7 @@
   const device = $("device"), live = $("live"), startEl = $("start"), startBtn = $("start-btn"), startNote = $("start-note");
   const debugEl = $("debug"), debugLog = $("debug-log");
 
-  const BUILD = "sonic-7"; // shown in the debug drawer, to confirm which code the browser runs
+  const BUILD = "sonic-8"; // shown in the debug drawer, to confirm which code the browser runs
 
   const params = new URLSearchParams(location.search);
   const LOCAL = /^(localhost|127\.0\.0\.1|\[::1\])$/.test(location.hostname);

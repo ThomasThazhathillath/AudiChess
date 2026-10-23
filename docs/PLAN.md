@@ -1,6 +1,10 @@
 # Alexa+ Blind Chess — Build Plan
 
 > On approval, this plan is copied into the repo as `docs/PLAN.md` (first step of Phase 0) and kept up to date as phases complete.
+>
+> **This is the build log, in order.** The first sections describe the original design (browser speech, Nova Pro).
+> The final system (Nova 2 Sonic voice, Nova 2 Lite agent, the AudiChess page) is described in the
+> [README](../README.md) and in the phases at the end.
 
 ## Context
 
