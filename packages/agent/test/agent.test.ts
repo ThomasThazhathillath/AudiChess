@@ -653,6 +653,23 @@ describe("Phase 6: background speech, speed and shorter answers", () => {
     expect(calls).toHaveLength(1);
   });
 
+  it("never shows the model the user's best moves in analysis nobody asked help from", async () => {
+    // 2026-10-23 live check: "that's an interesting move" -> analyze_position -> "The best move here … pawn to d4".
+    const analysis = { evaluation: { says: "You're slightly better." }, bestMoves: [{ move: "pawn to d4" }], tactics: { forks: ["knight to e5"] }, myPiecesYouCanWin: ["bishop on b4"], yourPiecesUnderAttack: [] };
+    const tools: ChessTools = { listTools: async () => MCP_TOOLS, callTool: async () => ({ isError: false, data: analysis }) };
+    const seen = async (text: string) => {
+      const sessions = new MemorySessionStore();
+      await gameSession(sessions, "s-coach");
+      const s = scriptedConverse([use("analyze_position", {}), say("Thanks!")]);
+      await runTurn({ converse: s.converse, tools, sessions, modelId: "m" }, "s-coach", text);
+      return JSON.stringify(s.calls.at(-1)!.messages);
+    };
+    const chat = await seen("that's an interesting move");
+    expect(chat).toContain("slightly better");
+    expect(chat).not.toMatch(/pawn to d4|knight to e5|bishop on b4/);
+    expect(await seen("any ideas for me here?")).toContain("pawn to d4");
+  });
+
   it("starts the new game when the answer to her colour question follows a restart request", async () => {
     // 2026-10-23 live game: "let's start a new game" -> "White or black?..." -> "white easy" was dropped as background.
     const sessions = new MemorySessionStore();

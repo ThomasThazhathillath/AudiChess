@@ -124,7 +124,7 @@ const LOCAL_TOOLS: Tool[] = [
     toolSpec: {
       name: "ask_again",
       description:
-        "Use when the user's words don't make sense as a move or a request (speech recognition garbled them), or for a greeting or small talk that needs no chess tool. Never use it to announce or invent moves. Put your whole short spoken reply in `reply`, worded freshly each time.",
+        "Use when the user's words don't make sense as a move or a request (speech recognition garbled them), or for a greeting, a comment or small talk (\"nice one\", \"that's an interesting move\", \"this is fun\"): then reply briefly and playfully, as their rival, without re-asking. Never use it to announce or invent moves, and never analyse the position for small talk. Put your whole short spoken reply in `reply`, worded freshly each time.",
       inputSchema: {
         json: {
           type: "object",
@@ -719,6 +719,26 @@ function answersRestart(session: Session): boolean {
   return user?.role === "user" && RESTART_WORDS.test(user.text) && assistant?.role === "assistant" && asksQuestion(assistant.text);
 }
 
+/**
+ * Words that ask for help with the user's own play. Without them, analysis reaches the model with no move for the
+ * user in it: "that's an interesting move" got "The best move here, according to the engine, would be pawn to d4"
+ * (2026-10-23 live check) after the model called analyze_position on its own.
+ */
+export const ASKS_FOR_HELP =
+  /\b(?:best|better|hint|clue|suggest\w*|recommend\w*|advice|advise|help|tips?|ideas?|plan|candidates?|options?|should (?:i|we)|what (?:can|could|would|do) (?:i|you) (?:play|do)|good moves?|strong moves?|tactics?|combination|win (?:a|your|the|some)|can i (?:take|capture|win|attack|grab)|anything (?:to take|i can take)|free (?:piece|pawn)|hanging|under attack|attacked|undefended|analy[sz]\w*|evaluat\w*|in my (?:place|shoes)|mistakes?|blunders?|went wrong|have played|improve)\b/i;
+
+/** Questions about her own threat or plan: the only way analysis keeps `threat` when no help was asked for. */
+const ASKS_HER_THREAT = /\b(?:threat\w*|plan\w*|up to|going to (?:play|do)|attack\w*|danger\w*|safe|watch out|careful|your (?:next )?move|you (?:play|do) next)\b/i;
+
+/**
+ * analyze_position minus everything that would suggest a move to the user, and minus her threat unless they asked
+ * about it ("My knight to f6 is a threat" answered "nice one" in the same check): an unasked warning is coaching too.
+ */
+export function withoutCoaching(facts: Record<string, unknown>, userText = ""): Record<string, unknown> {
+  const { bestMoves: _b, tactics: _t, myPiecesYouCanWin: _m, threat, ...rest } = facts;
+  return ASKS_HER_THREAT.test(userText) && threat !== undefined ? { ...rest, threat } : rest;
+}
+
 const capitalize = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
 
 /**
@@ -950,7 +970,7 @@ export async function runTurn(deps: AgentDeps, sessionId: string, input: TurnInp
         }
         timings.toolMs += Date.now() - t;
         isError = r.isError;
-        content = r.data;
+        content = name === "analyze_position" && !isError && !ASKS_FOR_HELP.test(userText) ? withoutCoaching(r.data, userText) : r.data;
       }
     }
 

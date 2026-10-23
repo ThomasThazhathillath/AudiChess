@@ -1085,3 +1085,31 @@ played. Then three things went wrong:
 coaching, against SKILL rule 3.
 
 **Cost of 9c:** about $0.11 (accent audio $0.01, ASR comparison about $0.04, 2 harness runs $0.05, live check).
+
+### Phase 9d — no unasked best moves in chat (2026-10-23)
+
+**Problem:** "that's an interesting move" got "The best move here, according to the engine, would be pawn to d4". The
+model called `analyze_position` on its own and repeated its `bestMoves`. Only two routed questions used to hide them.
+A real-model check of the first fix found two more problems:
+- every chat line got the same analysis sentence;
+- that sentence carried an unasked warning ("My knight to f6 is a threat").
+
+**Changed:**
+- **`withoutCoaching`** (in `runTool`, so routed and model-chosen calls alike): unless the user's words ask for help
+  (`ASKS_FOR_HELP`: best, hint, suggest, should I, hanging, under attack, analyse, mistakes…), analysis reaches the
+  model without `bestMoves`, `tactics` or `myPiecesYouCanWin`. It also leaves out `threat` unless they ask about her
+  threat or plan.
+- **Small talk gets banter:** the skill and `ask_again` now say that greetings, comments and small talk ("nice one",
+  "that's an interesting move", "this is fun") get one short, playful line as their rival, never analysis.
+
+**Checked:**
+- Real model, local server:
+  - chat lines got banter with no moves or threats;
+  - "how am I doing?" got the evaluation only;
+  - "what are you threatening?" named her threat;
+  - "what should I play?" still gave the hint.
+- Deployed agent: "that's an interesting move" → "Nice one! Let's keep going."; "this is fun" → "Fun is right! Let's
+  keep the game going."; the hint still works.
+- Tests: agent 81 (new: the model never sees the user's best moves in unasked analysis).
+
+**Still to improve:** the banter repeats a little ("…let's keep playing" twice in a row). **Cost:** under $0.01.
